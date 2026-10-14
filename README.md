@@ -8,7 +8,7 @@ Funciona entera en el navegador: abre `index.html` o publícala con GitHub Pages
 
 1. Crea un repositorio (p. ej. `segoptic`) y sube **todos** los archivos de esta carpeta a la raíz: `index.html`, `style.css`, `optics.js`, `app.js`, `.nojekyll`, `README.md`.
 2. En el repo: **Settings → Pages → Build and deployment → Source: Deploy from a branch**, rama `main`, carpeta `/ (root)` → Save.
-3. Al cabo de un minuto estará en `https://<usuario>.github.io/segoptic/`.
+3. Al cabo de un minuto estará en `https://alteredroger.github.io/segoptic/`.
 
 Para usarla en local basta con abrir `index.html` (no necesita servidor).
 
