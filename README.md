@@ -8,7 +8,7 @@ Funciona entera en el navegador: abre `index.html` o publícala con GitHub Pages
 
 1. Crea un repositorio (p. ej. `segoptic`) y sube **todos** los archivos de esta carpeta a la raíz: `index.html`, `style.css`, `optics.js`, `app.js`, `.nojekyll`, `README.md`.
 2. En el repo: **Settings → Pages → Build and deployment → Source: Deploy from a branch**, rama `main`, carpeta `/ (root)` → Save.
-3. Al cabo de un minuto estará en `https://alteredroger.github.io/SegOptic/`.
+3. Al cabo de un minuto estará en `https://<usuario>.github.io/segoptic/`.
 
 Para usarla en local basta con abrir `index.html` (no necesita servidor).
 
@@ -16,6 +16,7 @@ Para usarla en local basta con abrir `index.html` (no necesita servidor).
 
 | Pestaña | Contenido |
 |---|---|
+| Banco óptico | Editor visual 2D/3D: seleccionar, mover (con compensación de espesores), cambiar semi-Ø, curvar perfiles, insertar elementos con un clic sobre el haz, inspector con deslizadores y métricas en vivo |
 | Resumen | EFL, F/#, Ø equivalente, área, escala de placa, hueco entre segmentos, avisos, spot RMS por campo, prescripción |
 | Layout 2D | Corte YZ con rayos por campo, segmentos resaltados, zoom al foco |
 | Spot | Diagramas policromáticos por campo, RMS/GEO, círculo de Airy |
@@ -26,6 +27,17 @@ Para usarla en local basta con abrir `index.html` (no necesita servidor).
 | Herramientas | Solver Cassegrain (esférico, clásico, RC, Dall–Kirkham), resolución de actuador (husillo × micropasos), Monte Carlo de tolerancias de segmento |
 
 Los diseños se guardan automáticamente en el navegador y se pueden exportar/importar como `.json` (para compartir entre el equipo) o como prescripción `.txt`.
+
+## Banco óptico (edición interactiva)
+
+- **Seleccionar:** clic en una superficie del dibujo, en los botones STO/2/3/IMA del inspector o en una fila de la tabla (las tres vistas están sincronizadas).
+- **Mover:** arrastra el vértice ■ (o el perfil, en modo *Mover*). Se compensan el espesor anterior y el siguiente, así que el resto del sistema no se desplaza. Mayús = pasos de 1 mm.
+- **Semi-diámetro:** arrastra los puntos ● del borde.
+- **Curvar:** en modo *Curvar*, arrastra el perfil; el radio pasa a ser el de la esfera que contiene el vértice y el punto del ratón.
+- **Añadir:** elige *Lente, Menisco, Doblete, Placa, Espejo plano, Espejo esf.* o *Ficticia* y haz clic sobre el haz. Se coloca en ese punto exacto, con el semi-Ø ajustado a la huella del haz (+10 %). Mayús+clic para insertar varios. Los espejos insertados reflejan el resto del sistema, de modo que la óptica posterior sigue siendo equivalente (útil para diagonales de pliegue).
+- **Inspector:** radio/espesor/cónica con deslizador (recentrado al soltar), material con lista de vidrios, z del vértice, huella del haz, flecha en el borde (útil para fabricar) y potencia de la superficie.
+- **3D:** arrastra para orbitar, rueda para zoom. Muestra cada segmento del anillo.
+- **Deshacer / rehacer:** Ctrl+Z / Ctrl+Y (o Ctrl+Mayús+Z), también con los botones del editor. **Supr** elimina la superficie seleccionada.
 
 ## Convenciones (tipo Zemax)
 
