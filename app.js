@@ -381,9 +381,44 @@
   }
 
   // ---------- Layout ----------
+  // ---------------- pliegue a 45° (diagonal) solo para el dibujo ----------------
+  // El trazado es coaxial (espejo plano desplegado); aquí se refleja lo que hay tras la diagonal
+  // respecto a un espejo a 45° en el plano YZ para ver el foco en el lateral, como en el tubo real.
+  function foldOf(sv, cv) {
+    const S = sv.surfaces, L = S.length - 1;
+    const i = S.findIndex((x, k) => k > 0 && k < L && x.fold);
+    if (i < 1) return null;
+    const sgn = Math.sign(S[i - 1].t) || 1, R = Math.SQRT1_2;
+    const c = [cv.z[i], 0], n = [-sgn * R, R], m = [R, sgn * R];
+    const d = (z, y) => (z - c[0]) * n[0] + (y - c[1]) * n[1];
+    const refl = (z, y) => { const dz = z - c[0], dy = y - c[1], dot = dz * m[0] + dy * m[1]; return [c[0] + 2 * dot * m[0] - dz, c[1] + 2 * dot * m[1] - dy]; };
+    const p3 = p => { const r = refl(p[2], p[1]); return [p[0], r[1], r[0]]; };
+    const ray = pts => {
+      if (!pts || pts.length <= i) return pts;
+      const out = pts.slice(0, i); let crossed = false;
+      for (let k = i; k < pts.length; k++) {
+        const a = pts[k - 1], b = pts[k];
+        if (!crossed) {
+          const da = d(a[2], a[1]), db = d(b[2], b[1]);
+          if (db >= 0) { out.push(b); continue; }
+          const t = da > 0 ? da / (da - db) : 0;
+          out.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])]);
+          crossed = true;
+        }
+        out.push(p3(b));
+      }
+      return out;
+    };
+    const line = (half, N) => { const a = []; for (let k = 0; k <= N; k++) { const u = -half + 2 * half * k / N; a.push([c[0] + u * m[0], c[1] + u * m[1]]); } return a; };
+    const ellipse3 = (half) => { const a = []; for (let k = 0; k <= 48; k++) { const t = 2 * Math.PI * k / 48, u = half * Math.SQRT2 * Math.cos(t); a.push([half * Math.sin(t), c[1] + u * m[1], c[0] + u * m[0]]); } return a; };
+    return { i, c, d, refl, p3, ray, line, ellipse3 };
+  }
+
   function tabLayout(P) {
+    const LF = foldOf(sys, ctx), lfold = LF && ui.folded !== false ? LF : null;
     P.append(h('div', { class: 'ctrl' },
-      h('label', null, h('input', { type: 'checkbox', checked: ui.layoutZoom, onchange: e => { ui.layoutZoom = e.target.checked; renderTab(); } }), 'Zoom a la zona de foco')));
+      h('label', null, h('input', { type: 'checkbox', checked: ui.layoutZoom, onchange: e => { ui.layoutZoom = e.target.checked; renderTab(); } }), 'Zoom a la zona de foco'),
+      LF ? h('label', null, h('input', { type: 'checkbox', checked: ui.folded !== false, onchange: e => { ui.folded = e.target.checked; ui.refit = true; renderTab(); } }), 'Foco plegado (diagonal a 45°)') : null));
     const W = Math.min(1100, Math.max(320, P.clientWidth - 4)), H = Math.round(W * 0.48);
     const cv = h('canvas'); P.append(cv);
     const g = setupCanvas(cv, W, H);
@@ -394,7 +429,7 @@
     const rays = [];
     sys.fields.forEach((f, fi) => {
       const D = O.fieldDir(f.y);
-      pick.forEach(y => { const seg = O.pupilMask(ctx.ap, ctx.centers, 0, y); const r = O.traceRay(ctx, O.startPt(0, y, D, Math.max(150, E * 0.5)), D, wl, { seg, record: true }); rays.push({ fi, pts: r.pts, ok: r.ok }); });
+      pick.forEach(y => { const seg = O.pupilMask(ctx.ap, ctx.centers, 0, y); const r = O.traceRay(ctx, O.startPt(0, y, D, Math.max(150, E * 0.5)), D, wl, { seg, record: true }); rays.push({ fi, pts: lfold ? lfold.ray(r.pts) : r.pts, ok: r.ok }); });
     });
     // perfiles de superficie
     const prof = [];
@@ -406,9 +441,10 @@
       for (let k = 0; k <= 200; k++) {
         const y = -Hh + 2 * Hh * k / 200; if (s.hole > 0 && Math.abs(y) < s.hole) { pts.push(null); continue; }
         const zz = ctx.z[i] + (O.sagS(ctx, i, y * y) || 0);
-        pts.push([zz, y]);
+        pts.push(lfold && i > lfold.i ? lfold.refl(zz, y) : [zz, y]);
         segs.push(i === ctx.segSurf && O.pupilMask(ctx.ap, ctx.centers, 0, y) >= 0);
       }
+      if (lfold && i === lfold.i) { prof.push({ i, pts: lfold.line(Hh * Math.SQRT2, 40), segs: [], mirror: true }); continue; }
       prof.push({ i, pts, segs, mirror: ctx.mirror[i] });
     }
     // encuadre
@@ -418,6 +454,7 @@
       const zi = ctx.z[L], span = Math.max(20, Math.abs(sys.surfaces[L - 1].t) * 1.2);
       zmin = zi - span; zmax = zi + span * 0.15;
       rays.forEach(r => r.pts.forEach(p => { if (p[2] >= zmin && p[2] <= zmax) ymax = Math.max(ymax, Math.abs(p[1])); }));
+      if (lfold) { zmin = Infinity; zmax = -Infinity; ymax = 0; const im = prof[prof.length - 1].pts.filter(Boolean), cz = im.reduce((a, q) => a + q[0], 0) / im.length, cyy = im.reduce((a, q) => a + q[1], 0) / im.length, span = Math.max(20, Math.abs(sys.surfaces[L - 1].t) * 1.2); zmin = cz - span / 2; zmax = cz + span / 2; ymax = Math.abs(cyy) + span / 2; }
       prof.forEach(pr => pr.pts.forEach(p => { if (p && p[0] >= zmin && p[0] <= zmax) ymax = Math.max(ymax, Math.abs(p[1])); }));
     } else {
       prof.forEach(pr => pr.pts.forEach(p => p && acc(p[0], p[1])));
@@ -425,7 +462,7 @@
       zmin -= (zmax - zmin) * 0.12;
     }
     ymax = (ymax || 1) * 1.08;
-    const pad = 24, sx = (W - 2 * pad) / (zmax - zmin), sy = (H - 2 * pad) / (2 * ymax), sc = ui.layoutZoom ? null : Math.min(sx, sy);
+    const pad = 24, sx = (W - 2 * pad) / (zmax - zmin), sy = (H - 2 * pad) / (2 * ymax), sc = (ui.layoutZoom && !lfold) ? null : Math.min(sx, sy);
     const kx = sc || sx, ky = sc || sy;
     const cx0 = pad + ((W - 2 * pad) - (zmax - zmin) * kx) / 2;
     const X = z => cx0 + (z - zmin) * kx, Y = y => H / 2 - y * ky;
@@ -894,6 +931,7 @@
     const tools = h('div', { class: 'bench-tool' },
       tg([['2d', '2D'], ['3d', '3D']], ui.bview, k => { ui.bview = k; if (k === '3d') ui.insert = null; rebuildToolbar(); }),
       ui.bview === '2d' ? tg([['move', 'Mover'], ['bend', 'Curvar']], ui.bmode, k => { ui.bmode = k; rebuildToolbar(); B.frame(); }) : null,
+      foldOf(sys, ctx) ? tg([['fold', 'Foco plegado'], ['unfold', 'Desplegado']], ui.folded !== false ? 'fold' : 'unfold', k => { ui.folded = k === 'fold'; if (ui.folded) ui.insert = null; ui.v2 = null; ui.v3 = ui.v3 ? { yaw: ui.v3.yaw, pitch: ui.v3.pitch } : null; rebuildToolbar(); }) : null,
       h('button', { onclick: () => B.fit() }, 'Encuadrar'),
       h('label', { class: 'lbl' }, 'Rayos', h('select', { onchange: e => { ui.benchRays = +e.target.value; B.frame(); } }, [5, 7, 11, 17, 25].map(n => h('option', { value: n, selected: ui.benchRays === n }, n)))));
     const toolbarWrap = h('div', { class: 'bench-bar' }, tools, ui.bview === '2d' ? palette : null);
@@ -907,7 +945,7 @@
     const wrap = h('div', { class: 'bench-cvwrap' }, cv, hint);
     const root = h('div', { class: 'bench' }, toolbarWrap, h('div', { class: 'bench-main' }, h('div', null, wrap, live), insp));
     P.append(root);
-    Object.assign(B, { root, cv, insp, live, hint, wrap });
+    Object.assign(B, { root, cv, insp, live, hint, wrap, hasFold: !!foldOf(sys, ctx) });
 
     // --- geometría -----------------------------------------------------
     function footprintAt(rays, i) { let m = 0; rays.forEach(r => { const p = r.pts[i]; if (p) m = Math.max(m, Math.hypot(p[0], p[1])); }); return m; }
@@ -940,18 +978,29 @@
       }
       return { rays, profs };
     }
+    // geometría para dibujar: la de trazado, o plegada en la diagonal
+    function FO() { return ui.folded !== false ? foldOf(sys, ctx) : null; }
+    function viewGeo(G) {
+      const F = FO(); if (!F) return G;
+      return {
+        rays: G.rays.map(r => Object.assign({}, r, { pts: F.ray(r.pts) })),
+        profs: G.profs.map(p => p.i < F.i ? p : p.i === F.i ? Object.assign({}, p, { pts: F.line(p.Hh * Math.SQRT2, 60), segOn: [], mirror: true, dummy: false, fold: true }) : Object.assign({}, p, { pts: p.pts.map(q => q ? F.refl(q[0], q[1]) : null) }))
+      };
+    }
     function isAir(i) { const s = sys.surfaces[i]; return !s || O.isMirror(s.mat) ? true : Math.abs(O.glassIndex(s.mat, 0.55) - 1) < 1e-9; }
     function isGlass(i) { const s = sys.surfaces[i]; return s && !O.isMirror(s.mat) && O.glassIndex(s.mat, 0.55) > 1.0001; }
     function sagW(i, y) { const v = O.sagS(ctx, i, y * y); return isFinite(v) ? ctx.z[i] + v : NaN; }
     // punto del perfil (corte x = 0) en coordenadas mundo [z, y], con descentrados
     function zy(i, y) { const z = sagW(i, y); if (!isFinite(z)) return null; const w = O.xfPoint(ctx, i, [0, y, z]); return [w[2], w[1]]; }
+    function zyV(i, y) { const q = zy(i, y), F = FO(); return q && F && i > F.i ? F.refl(q[0], q[1]) : q; }
+    const lockedByFold = i => { const F = FO(); return !!(F && i >= F.i); };
     function P3(i, x, y) { const z = sagW(i, Math.hypot(x, y)); return isFinite(z) ? O.xfPoint(ctx, i, [x, y, z]) : null; }
 
     // --- vista ---------------------------------------------------------
     const X = z => B.W / 2 + (z - ui.v2.zc) * ui.v2.k, Y = y => B.H / 2 - (y - ui.v2.yc) * ui.v2.k;
     const Z_ = x => ui.v2.zc + (x - B.W / 2) / ui.v2.k, Y_ = yy => ui.v2.yc - (yy - B.H / 2) / ui.v2.k;
     B.fit = function () {
-      const g = B.geo || computeGeo();
+      const g = viewGeo(B.geo || computeGeo());
       if (ui.bview === '2d') {
         let z0 = Infinity, z1 = -Infinity, ym = 0;
         const acc = (z, y) => { if (!isFinite(z) || !isFinite(y)) return; z0 = Math.min(z0, z); z1 = Math.max(z1, z); ym = Math.max(ym, Math.abs(y)); };
@@ -988,17 +1037,20 @@
       for (let i = 1; i <= L; i++) { zmin = Math.min(zmin, ctx.z[i]); zmax = Math.max(zmax, ctx.z[i]); }
       zmid3 = (zmin + zmax) / 2;
       const ring = (cx, cy, r, i) => { const a = []; for (let k = 0; k <= 48; k++) { const t = 2 * Math.PI * k / 48, q = P3(i, cx + r * Math.cos(t), cy + r * Math.sin(t)); if (q) a.push(q); } return a; };
+      const F = FO();
       for (let i = 1; i <= L; i++) {
         const s = sys.surfaces[i], pr = g2.profs[i - 1], lines = [], fills = [];
-        if (i === ctx.segSurf) {
+        if (F && i === F.i) { const el = F.ellipse3(pr.Hh); lines.push(el); fills.push(el); }
+        else if (i === ctx.segSurf) {
           ctx.centers.forEach(c => { const rg = ring(c[0], c[1], ctx.ap.dseg / 2, i); lines.push(rg); fills.push(rg); const cr = []; for (let k = -6; k <= 6; k++) { const x = c[0] + ctx.ap.dseg / 2 * k / 6; const q = P3(i, x, c[1]); if (q) cr.push(q); } lines.push(cr); });
         } else {
           const rg = ring(0, 0, pr.Hh, i); lines.push(rg); fills.push(rg);
           if (s.hole > 0) lines.push(ring(0, 0, s.hole, i));
           for (const ax of [0, 1]) { let cur = []; for (let k = 0; k <= 40; k++) { const u = -pr.Hh + 2 * pr.Hh * k / 40; if (s.hole > 0 && Math.abs(u) < s.hole) { if (cur.length) lines.push(cur); cur = []; continue; } const q = ax ? P3(i, 0, u) : P3(i, u, 0); if (q) cur.push(q); } if (cur.length) lines.push(cur); }
         }
+        if (F && i > F.i) { for (let a = 0; a < lines.length; a++) lines[a] = lines[a].map(F.p3); for (let a = 0; a < fills.length; a++) fills[a] = fills[a].map(F.p3); }
         lines.forEach(l => l.forEach(p => all.push(p)));
-        surfs.push({ i, lines, fills, mirror: ctx.mirror[i], img: i === L });
+        surfs.push({ i, lines, fills, mirror: ctx.mirror[i] || !!(F && i === F.i), img: i === L });
       }
       const rays = [];
       const samp = [];
@@ -1006,7 +1058,7 @@
       else for (let q = 0; q < 12; q++) { const a = q * Math.PI / 6; samp.push([0.45 * E * Math.cos(a), 0.45 * E * Math.sin(a)]); }
       sys.fields.forEach((f, fi) => {
         const D = O.fieldDir(f.y);
-        samp.forEach(([x, y]) => { const seg = O.pupilMask(ctx.ap, ctx.centers, x, y); if (seg < 0) return; const r = O.traceRay(ctx, O.startPt(x, y, D, Math.max(120, E * 0.35)), D, wl, { seg, record: true }); rays.push({ fi, pts: r.pts, ok: r.ok }); r.pts.forEach(p => all.push(p)); });
+        samp.forEach(([x, y]) => { const seg = O.pupilMask(ctx.ap, ctx.centers, x, y); if (seg < 0) return; const r = O.traceRay(ctx, O.startPt(x, y, D, Math.max(120, E * 0.35)), D, wl, { seg, record: true }); const pts = F ? F.ray(r.pts) : r.pts; rays.push({ fi, pts, ok: r.ok }); pts.forEach(p => all.push(p)); });
       });
       return { surfs, rays, all };
     }
@@ -1039,14 +1091,14 @@
     }
     function draw2(g) {
       if (!ui.v2) { B.fit(); return; }
-      const G = B.geo, L = ctx.L;
+      const G = viewGeo(B.geo), L = ctx.L, Fd = FO();
       // eje
       g.strokeStyle = css('--line'); g.setLineDash([4, 4]); g.beginPath(); g.moveTo(0, Y(0)); g.lineTo(B.W, Y(0)); g.stroke(); g.setLineDash([]);
       // vidrio
       for (let i = 1; i < L; i++) {
         if (!isGlass(i)) continue;
         const a = G.profs[i - 1], b = G.profs[i], Hh = Math.min(a.Hh, b.Hh), hole = Math.max(sys.surfaces[i].hole || 0, sys.surfaces[i + 1].hole || 0);
-        const side = (sgn) => { g.beginPath(); let first = true; for (let k = 0; k <= 60; k++) { const y = sgn * (hole + (Hh - hole) * k / 60); const q = zy(i, y); if (!q) continue; first ? g.moveTo(X(q[0]), Y(q[1])) : g.lineTo(X(q[0]), Y(q[1])); first = false; } for (let k = 60; k >= 0; k--) { const y = sgn * (hole + (Hh - hole) * k / 60); const q = zy(i + 1, y); if (!q) continue; g.lineTo(X(q[0]), Y(q[1])); } g.closePath(); g.fill(); };
+        const side = (sgn) => { g.beginPath(); let first = true; for (let k = 0; k <= 60; k++) { const y = sgn * (hole + (Hh - hole) * k / 60); const q = zyV(i, y); if (!q) continue; first ? g.moveTo(X(q[0]), Y(q[1])) : g.lineTo(X(q[0]), Y(q[1])); first = false; } for (let k = 60; k >= 0; k--) { const y = sgn * (hole + (Hh - hole) * k / 60); const q = zyV(i + 1, y); if (!q) continue; g.lineTo(X(q[0]), Y(q[1])); } g.closePath(); g.fill(); };
         g.fillStyle = css('--acc2'); g.globalAlpha = 0.16; side(1); side(-1); g.globalAlpha = 1;
       }
       // rayos
@@ -1070,7 +1122,7 @@
         if (p.dummy && !sel) g.setLineDash([5, 4]);
         g.beginPath(); let st = false; polys[k].forEach(q => { if (!q) { st = false; return; } st ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); st = true; }); g.stroke(); g.setLineDash([]);
         if (i === ctx.segSurf) { g.strokeStyle = css('--acc'); g.lineWidth = 3.4; g.beginPath(); st = false; polys[k].forEach((q, n) => { if (!q || !p.segOn[n]) { st = false; return; } st ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); st = true; }); g.stroke(); }
-        if (p.mirror) { // rayado en la cara trasera
+        if (p.mirror && !p.fold) { // rayado en la cara trasera
           const sin = i === 1 ? 1 : (Math.sign(sys.surfaces[i - 1].t) || 1);
           g.strokeStyle = sel ? css('--acc') : css('--ink3'); g.lineWidth = 1;
           polys[k].forEach((q, n) => { if (!q || n % 7) return; g.beginPath(); g.moveTo(q[0], q[1]); g.lineTo(q[0] + sin * 6, q[1] - 5); g.stroke(); });
@@ -1079,7 +1131,7 @@
         const top = polys[k].find(q => q); if (top) { g.fillStyle = sel ? css('--acc') : css('--ink2'); g.font = '11px IBM Plex Mono, monospace'; g.textAlign = 'center'; g.fillText(p.img ? 'IMA' : i === 1 ? 'STO' : i, top[0], top[1] - 8); }
       });
       // tiradores
-      if (ui.sel != null) {
+      if (ui.sel != null && !lockedByFold(ui.sel)) {
         const i = ui.sel, s = sys.surfaces[i], p = G.profs[i - 1];
         if (p) {
           const v0 = zy(i, 0) || [ctx.z[i], 0], vx = X(v0[0]), vy = Y(v0[1]);
@@ -1095,6 +1147,7 @@
       if (!B.drag) B.hint.textContent = ui.insert
         ? 'Haz clic sobre el haz donde quieres colocar el elemento (Mayús+clic para seguir insertando · Esc cancela)'
         : ui.bmode === 'bend' ? 'Modo Curvar: arrastra el perfil de una superficie para cambiar su radio'
+        : Fd ? 'Vista con foco plegado: lo que hay tras la diagonal solo se visualiza (pasa a «Desplegado» para editarlo o insertar elementos)'
         : 'Clic = seleccionar · arrastra el vértice ■ para mover (Mayús = pasos de 1 mm) · ● del borde = semi-Ø · fondo = desplazar · rueda = zoom';
     }
 
@@ -1143,7 +1196,7 @@
       return best;
     }
     function handleHit(p) {
-      if (ui.sel == null || !B.geo) return null;
+      if (ui.sel == null || !B.geo || lockedByFold(ui.sel)) return null;
       const i = ui.sel, pr = B.geo.profs[i - 1]; if (!pr) return null;
       const v0 = zy(i, 0) || [ctx.z[i], 0];
       if (Math.hypot(p.x - X(v0[0]), p.y - Y(v0[1])) < 9) return { type: 'move', i };
@@ -1181,6 +1234,7 @@
       changed({ lde: true, now: true });
     }
     B.setInsert = function (k) {
+      if (k && FO()) { ui.folded = false; ui.insert = k; ui.v2 = null; toast('Para insertar elementos se pasa a la vista desplegada (el trazado real del sistema).'); rebuildToolbar(); return; }
       ui.insert = k; B.target = null;
       root.querySelectorAll('.palette button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
       cv.style.cursor = k ? 'crosshair' : 'default';
@@ -1205,6 +1259,7 @@
       const si = hd ? hd.i : surfHit(p);
       if (si != null) {
         if (si !== ui.sel) selectSurface(si);
+        if (lockedByFold(si)) return;
         const S = sys.surfaces, i = si, L = S.length - 1;
         const type = hd ? hd.type : (ui.bmode === 'bend' ? 'bend' : 'move');
         B.drag = { type, i, x: p.x, y: p.y, tPrev: i > 1 ? S[i - 1].t : null, tNext: i < L ? S[i].t : null, zc: ui.v2.zc, changed: false };
@@ -1318,6 +1373,9 @@
       row('Cónica', textIn('k', false), slider(() => s.k, v => { s.k = +v.toFixed(5); }, 2), '');
       if (!isImg) { row('A4', textIn('a4', false), null, 'mm⁻³'); row('A6', textIn('a6', false), null, 'mm⁻⁵'); row('A8', textIn('a8', false), null, 'mm⁻⁷'); }
       if (!document.getElementById('glassList')) document.body.append(h('datalist', { id: 'glassList' }, ['MIRROR', 'AIR'].concat(Object.keys(O.GLASS)).map(g => h('option', { value: g }))));
+      if (!isImg && i > 1 && !O.isMirror(s.mat) && !isFinite(s.r) && isAir(i) && isAir(i - 1)) {
+        insp.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!s.fold, onchange: e => { S.forEach(x => delete x.fold); if (e.target.checked) s.fold = true; ui.folded = true; changed({ lde: true, now: true }); rebuildToolbar(); } }), 'Diagonal de pliegue a 45° (solo afecta al dibujo: permite ver el foco plegado al lateral)'));
+      }
       if (sys.aperture.type === 'segmented' && !isImg) {
         insp.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!s.seg, onchange: e => { S.forEach(x => delete x.seg); if (e.target.checked) s.seg = true; changed({ lde: true }); } }), 'Superficie segmentada (aplica la pupila en anillo y los errores de segmento)'));
       }
@@ -1348,6 +1406,7 @@
     }
 
     B.refresh = function () {
+      if (!!foldOf(sys, ctx) !== B.hasFold) { rebuildToolbar(); return; }
       B.size();
       if (ui.refit) { ui.refit = false; ui.v2 = null; ui.v3 = ui.v3 ? { yaw: ui.v3.yaw, pitch: ui.v3.pitch } : null; }
       buildInspector();

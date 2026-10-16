@@ -176,10 +176,10 @@
     const s = base(`Newtoniano ${p.D} mm f/${p.N}`, aperture(p, Math.ceil(m)), WL[p.wl], F, h, [
       OBJ(),
       surf({ cm: 'Primario parabólico (STO)', r: r4(-2 * F), t: r4(-(F - L)), mat: 'MIRROR', sd: p.D / 2, k: -1, seg: !!p.seg }),
-      surf({ cm: 'Diagonal plana (representada desplegada)', t: r4(-L), mat: '', sd: r4(m / 2) }),
+      surf({ cm: 'Diagonal plana a 45°', t: r4(-L), mat: '', sd: r4(m / 2), fold: true }),
       IMA()]);
     paraxialFocus(s);
-    return { sys: s, note: `Eje menor de la diagonal: ${m.toFixed(1)} mm (obstrucción ${(100 * m / p.D).toFixed(0)} %). La diagonal se representa desplegada sobre el eje: un espejo plano no cambia las aberraciones, y su sombra está en la obstrucción de la apertura.` };
+    return { sys: s, note: `Eje menor de la diagonal: ${m.toFixed(1)} mm (obstrucción ${(100 * m / p.D).toFixed(0)} %). El trazado trata la diagonal desplegada (un espejo plano no cambia las aberraciones y su sombra está en la obstrucción); en el Banco puedes ver el foco plegado al lateral o desplegado.` };
   };
 
   function cassFamily(p, kind) {
