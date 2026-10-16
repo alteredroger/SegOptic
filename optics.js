@@ -81,6 +81,33 @@
     return [cb, 0, sb, sa * sb, ca, -sa * cb, -ca * sb, sa, ca * cb];
   }
 
+  // ---------- Movimientos rígidos (descentrados / inclinaciones) ----------
+  // T = {R (3x3 fila mayor), P (pivote), d (traslación)}: mundo = P + R·(q − P) + d
+  function rotXY(axDeg, ayDeg) { // R = Ry(ay)·Rx(ax)
+    const a = axDeg * Math.PI / 180, b = ayDeg * Math.PI / 180;
+    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b);
+    return [cb, sb * sa, sb * ca, 0, ca, -sa, -sb, cb * sa, cb * ca];
+  }
+  function rotBetween(a, b) { // rotación que lleva el vector unitario a sobre b
+    const vx = a[1] * b[2] - a[2] * b[1], vy = a[2] * b[0] - a[0] * b[2], vz = a[0] * b[1] - a[1] * b[0];
+    const c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2], s2 = vx * vx + vy * vy + vz * vz;
+    if (s2 < 1e-30) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    const f = (1 - c) / s2;
+    return [1 + f * (vx * vx - s2), -vz + f * vx * vy, vy + f * vx * vz,
+      vz + f * vx * vy, 1 + f * (vy * vy - s2), -vx + f * vy * vz,
+      -vy + f * vx * vz, vx + f * vy * vz, 1 + f * (vz * vz - s2)];
+  }
+  function toLoc(T, x, y, z) {
+    const R = T.R, u = x - T.P[0] - T.d[0], v = y - T.P[1] - T.d[1], w = z - T.P[2] - T.d[2];
+    return [R[0] * u + R[3] * v + R[6] * w + T.P[0], R[1] * u + R[4] * v + R[7] * w + T.P[1], R[2] * u + R[5] * v + R[8] * w + T.P[2]];
+  }
+  function dirLoc(T, x, y, z) { const R = T.R; return [R[0] * x + R[3] * y + R[6] * z, R[1] * x + R[4] * y + R[7] * z, R[2] * x + R[5] * y + R[8] * z]; }
+  function toWld(T, x, y, z) {
+    const R = T.R, u = x - T.P[0], v = y - T.P[1], w = z - T.P[2];
+    return [R[0] * u + R[1] * v + R[2] * w + T.P[0] + T.d[0], R[3] * u + R[4] * v + R[5] * w + T.P[1] + T.d[1], R[6] * u + R[7] * v + R[8] * w + T.P[2] + T.d[2]];
+  }
+  function dirWld(T, x, y, z) { const R = T.R; return [R[0] * x + R[1] * y + R[2] * z, R[3] * x + R[4] * y + R[5] * z, R[6] * x + R[7] * y + R[8] * z]; }
+
   // ---------- Apertura ----------
   function epd(ap) { return ap.type === 'segmented' ? 2 * ap.ringR + ap.dseg : ap.D; }
   function segAngles(ap) {
@@ -151,16 +178,37 @@
         const tx = (+e.tx || 0) * 1e-6, ty = (+e.ty || 0) * 1e-6, pz = (+e.p || 0) * 1e-6, dR = +e.dR || 0;
         let s = sag(ci, ki, cc[0] * cc[0] + cc[1] * cc[1]); if (!isFinite(s)) s = 0;
         const C = [cc[0], cc[1], zi + s];
-        let Rs = 0, Cc = null;
+        // ΔROC: cónica madre con |R| + ΔR (misma k), que pasa por el centro del segmento y realineada
+        // (tip/tilt) para que su normal allí coincida con la nominal
+        let Ta = null, cS = ci, zS = zi;
         if (dR !== 0 && ci !== 0) {
-          const g = normalLocal(cc[0], cc[1], s, ci, ki), sg = ci > 0 ? 1 : -1;
-          Rs = Math.abs(1 / ci) + dR;
-          if (Rs > 0) Cc = [C[0] - sg * g[0] * Rs, C[1] - sg * g[1] * Rs, C[2] - sg * g[2] * Rs]; else Rs = 0;
+          const R0 = 1 / ci, Rn = R0 + Math.sign(R0) * dR;
+          if (Rn * R0 > 0) {
+            const c2 = 1 / Rn, r2 = cc[0] * cc[0] + cc[1] * cc[1], s2 = sag(c2, ki, r2);
+            if (isFinite(s2)) {
+              cS = c2; zS = zi + s - s2;
+              Ta = { R: rotBetween(normalLocal(cc[0], cc[1], s2, c2, ki), normalLocal(cc[0], cc[1], s, ci, ki)), P: C, d: [0, 0, 0] };
+            }
+          }
         }
-        return { C, R: rotMat(tx, ty), pz, Rs, Cc, trivial: tx === 0 && ty === 0 && pz === 0 && !Cc };
+        const Rm = rotMat(tx, ty);
+        return { C, R: Rm, pz, T: { R: Rm, P: C, d: [0, 0, pz] }, Ta, cS, zS, trivial: tx === 0 && ty === 0 && pz === 0 && !Ta };
       });
     }
-    return { sys, S, L, z, c, k, mirror, ap, centers, segSurf, segData, epd: epd(ap), nCache: new Map(), pupCache: new Map() };
+    // grupos de superficies con movimiento rígido (pivote = vértice de la primera + desplazamiento axial)
+    const xf = new Array(S.length).fill(null);
+    let nPert = 0;
+    (sys.perturb || []).forEach(g => {
+      if (!g || g.on === false) return;
+      const a = Math.max(1, g.from | 0), b = Math.min(L, g.to | 0);
+      if (b < a) return;
+      const dx = +g.dx || 0, dy = +g.dy || 0, dz = +g.dz || 0, tx = +g.tx || 0, ty = +g.ty || 0;
+      if (!dx && !dy && !dz && !tx && !ty) return;
+      const T = { R: rotXY(tx, ty), P: [0, 0, z[a] + (+g.piv || 0)], d: [dx, dy, dz] };
+      for (let i = a; i <= b; i++) (xf[i] = xf[i] || []).push(T);
+      nPert++;
+    });
+    return { sys, S, L, z, c, k, mirror, ap, centers, segSurf, segData, xf, nPert, epd: epd(ap), nCache: new Map(), pupCache: new Map() };
   }
 
   function idxArr(ctx, wl) {
@@ -182,47 +230,43 @@
       const zi = ctx.z[i], c = ctx.c[i], k = ctx.k[i];
       let t, hx, hy, hz, nx, ny, nz;
       const sd = (i === ctx.segSurf && seg >= 0 && ctx.segData) ? ctx.segData[seg] : null;
-      if (sd && !sd.trivial) {
-        const C = sd.C, R = sd.R;
-        const qx = px - C[0], qy = py - C[1], qz = pz - C[2] - sd.pz;
-        const lx = R[0] * qx + R[3] * qy + R[6] * qz + C[0];
-        const ly = R[1] * qx + R[4] * qy + R[7] * qz + C[1];
-        const lz = R[2] * qx + R[5] * qy + R[8] * qz + C[2];
-        const ex = R[0] * dx + R[3] * dy + R[6] * dz;
-        const ey = R[1] * dx + R[4] * dy + R[7] * dz;
-        const ez = R[2] * dx + R[5] * dy + R[8] * dz;
-        let Hx, Hy, Hz, Nx, Ny, Nz;
-        if (sd.Cc) {
-          const wx = lx - sd.Cc[0], wy = ly - sd.Cc[1], wz = lz - sd.Cc[2];
-          const b = wx * ex + wy * ey + wz * ez, cc = wx * wx + wy * wy + wz * wz - sd.Rs * sd.Rs;
-          const disc = b * b - cc;
-          if (disc < 0) return { ok: false, at: i, pts };
-          const s = Math.sqrt(disc), t1 = -b - s, t2 = -b + s;
-          t = Math.abs(lz + t1 * ez - zi) <= Math.abs(lz + t2 * ez - zi) ? t1 : t2;
-          Hx = lx + t * ex; Hy = ly + t * ey; Hz = lz + t * ez;
-          Nx = (Hx - sd.Cc[0]) / sd.Rs; Ny = (Hy - sd.Cc[1]) / sd.Rs; Nz = (Hz - sd.Cc[2]) / sd.Rs;
-        } else {
-          t = intersectConic(lx, ly, lz - zi, ex, ey, ez, c, k);
-          if (!isFinite(t)) return { ok: false, at: i, pts };
-          Hx = lx + t * ex; Hy = ly + t * ey; Hz = lz + t * ez;
-          const nn = normalLocal(Hx, Hy, Hz - zi, c, k); Nx = nn[0]; Ny = nn[1]; Nz = nn[2];
-        }
-        const ux = Hx - C[0], uy = Hy - C[1], uz = Hz - C[2];
-        hx = R[0] * ux + R[1] * uy + R[2] * uz + C[0];
-        hy = R[3] * ux + R[4] * uy + R[5] * uz + C[1];
-        hz = R[6] * ux + R[7] * uy + R[8] * uz + C[2] + sd.pz;
-        nx = R[0] * Nx + R[1] * Ny + R[2] * Nz;
-        ny = R[3] * Nx + R[4] * Ny + R[5] * Nz;
-        nz = R[6] * Nx + R[7] * Ny + R[8] * Nz;
-      } else {
-        t = intersectConic(px, py, pz - zi, dx, dy, dz, c, k);
-        if (!isFinite(t)) return { ok: false, at: i, pts };
-        hx = px + t * dx; hy = py + t * dy; hz = pz + t * dz;
-        const nn = normalLocal(hx, hy, hz - zi, c, k); nx = nn[0]; ny = nn[1]; nz = nn[2];
+      const useSeg = sd && !sd.trivial, xs = ctx.xf[i];
+      let qx = px, qy = py, qz = pz, ex = dx, ey = dy, ez = dz, tmp;
+      if (xs) for (let a = 0; a < xs.length; a++) {
+        tmp = toLoc(xs[a], qx, qy, qz); qx = tmp[0]; qy = tmp[1]; qz = tmp[2];
+        tmp = dirLoc(xs[a], ex, ey, ez); ex = tmp[0]; ey = tmp[1]; ez = tmp[2];
       }
+      if (useSeg) {
+        tmp = toLoc(sd.T, qx, qy, qz); qx = tmp[0]; qy = tmp[1]; qz = tmp[2];
+        tmp = dirLoc(sd.T, ex, ey, ez); ex = tmp[0]; ey = tmp[1]; ez = tmp[2];
+        if (sd.Ta) {
+          tmp = toLoc(sd.Ta, qx, qy, qz); qx = tmp[0]; qy = tmp[1]; qz = tmp[2];
+          tmp = dirLoc(sd.Ta, ex, ey, ez); ex = tmp[0]; ey = tmp[1]; ez = tmp[2];
+        }
+      }
+      const cU = useSeg ? sd.cS : c, zU = useSeg ? sd.zS : zi;
+      let Hx, Hy, Hz, Nx, Ny, Nz;
+      t = intersectConic(qx, qy, qz - zU, ex, ey, ez, cU, k);
+      if (!isFinite(t)) return { ok: false, at: i, pts };
+      Hx = qx + t * ex; Hy = qy + t * ey; Hz = qz + t * ez;
+      { const nn = normalLocal(Hx, Hy, Hz - zU, cU, k); Nx = nn[0]; Ny = nn[1]; Nz = nn[2]; }
+      if (useSeg) {
+        if (sd.Ta) {
+          tmp = toWld(sd.Ta, Hx, Hy, Hz); Hx = tmp[0]; Hy = tmp[1]; Hz = tmp[2];
+          tmp = dirWld(sd.Ta, Nx, Ny, Nz); Nx = tmp[0]; Ny = tmp[1]; Nz = tmp[2];
+        }
+        tmp = toWld(sd.T, Hx, Hy, Hz); Hx = tmp[0]; Hy = tmp[1]; Hz = tmp[2];
+        tmp = dirWld(sd.T, Nx, Ny, Nz); Nx = tmp[0]; Ny = tmp[1]; Nz = tmp[2];
+      }
+      const apx = Hx, apy = Hy; // coordenadas de apertura: ejes propios del elemento
+      if (xs) for (let a = xs.length - 1; a >= 0; a--) {
+        tmp = toWld(xs[a], Hx, Hy, Hz); Hx = tmp[0]; Hy = tmp[1]; Hz = tmp[2];
+        tmp = dirWld(xs[a], Nx, Ny, Nz); Nx = tmp[0]; Ny = tmp[1]; Nz = tmp[2];
+      }
+      hx = Hx; hy = Hy; hz = Hz; nx = Nx; ny = Ny; nz = Nz;
       opl += n * t;
       if (!o.noApert) {
-        const s = ctx.S[i], r2 = hx * hx + hy * hy, sdv = +s.sd || 0, ho = +s.hole || 0;
+        const s = ctx.S[i], r2 = apx * apx + apy * apy, sdv = +s.sd || 0, ho = +s.hole || 0;
         if ((sdv > 0 && r2 > sdv * sdv * (1 + 1e-9)) || (ho > 0 && r2 < ho * ho)) {
           if (pts) pts.push([hx, hy, hz]);
           return { ok: false, at: i, pts };
@@ -275,12 +319,16 @@
   // ---------- Paraxial (rayo real de altura muy pequeña) ----------
   function paraxial(ctx, sys) {
     const wl = sys.wavelengths[sys.primary || 0].wl, L = ctx.L;
+    // diferencia central (+h / −h): robusta frente a desapuntados por descentrados
     const h = Math.max(1e-4, ctx.epd * 1e-5);
-    const r = traceRay(ctx, [0, h, -200], [0, 0, 1], wl, { seg: -1, noApert: true, stopAt: L - 1 });
-    if (!r.ok || Math.abs(r.D[1]) < 1e-15) return null;
-    const efl = -h * Math.abs(r.D[2]) / r.D[1];
-    const tt = -r.P[1] / r.D[1];
-    const zf = r.P[2] + tt * r.D[2];
+    const a = traceRay(ctx, [0, h, -200], [0, 0, 1], wl, { seg: -1, noApert: true, stopAt: L - 1 });
+    const b = traceRay(ctx, [0, -h, -200], [0, 0, 1], wl, { seg: -1, noApert: true, stopAt: L - 1 });
+    if (!a.ok || !b.ok) return null;
+    const sa = a.D[1] / Math.abs(a.D[2]), sb = b.D[1] / Math.abs(b.D[2]);
+    if (Math.abs(sa - sb) < 1e-15) return null;
+    const efl = -2 * h / (sa - sb);
+    const ma = a.D[1] / a.D[2], mb = b.D[1] / b.D[2];
+    const zf = (b.P[1] - a.P[1] + a.P[2] * ma - b.P[2] * mb) / (ma - mb);
     const st = apertureStats(ctx.ap);
     return {
       efl, fno: efl / ctx.epd, fnoEq: efl / st.deq, bfl: zf - ctx.z[L - 1], zImage: ctx.z[L], zFocus: zf,
@@ -492,6 +540,88 @@
       rsag.push(Math.hypot(orr[kk], ori[kk]) / mr0);
     }
     return { img, K, dx, strehl: pk / pkr, ee: { r: eeR, e: ee, ref: eeRef }, mtf: { f, tan, sag: sag_, rtan, rsag, cutoff: 1 / (wl * 1e-3 * Math.abs(par.fno)) }, om, M, par };
+  }
+
+  // ---------- Herramientas de validación ----------
+  // punto de la superficie i (coordenadas nominales locales) llevado al mundo con sus descentrados
+  function xfPoint(ctx, i, p) {
+    const xs = ctx.xf[i]; let q = p;
+    if (xs) for (let a = xs.length - 1; a >= 0; a--) q = toWld(xs[a], q[0], q[1], q[2]);
+    return q;
+  }
+  // rayos de un campo trazados hasta la última superficie antes de la imagen (para reenfocar sin retrazar)
+  function fieldRays(ctx, sys, fieldDeg, N, wls) {
+    wls = wls || sys.wavelengths.map((w, i) => i);
+    const D = fieldDir(fieldDeg), samp = pupilSamples(ctx, N), L = ctx.L, rays = [];
+    let launched = 0, lost = 0;
+    for (const wi of wls) {
+      const w = sys.wavelengths[wi];
+      for (const s of samp) {
+        launched++;
+        const r = traceRay(ctx, startPt(s.x, s.y, D), D, w.wl, { seg: s.seg, stopAt: L - 1 });
+        if (!r.ok) { lost++; continue; }
+        rays.push({ P: r.P, D: r.D, w: w.w, wi });
+      }
+    }
+    const ch = traceRay(ctx, startPt(0, 0, D), D, sys.wavelengths[sys.primary || 0].wl, { seg: -1, noApert: true, stopAt: L - 1 });
+    return { rays, chief: ch.ok ? ch : null, lostFrac: lost / Math.max(1, launched), launched, field: fieldDeg };
+  }
+  function imgHit(ctx, P, D, dz) {
+    const L = ctx.L, zi = ctx.z[L] + dz;
+    let Q = P, E = D;
+    const xs = ctx.xf[L];
+    if (xs) for (let a = 0; a < xs.length; a++) { Q = toLoc(xs[a], Q[0], Q[1], Q[2]); E = dirLoc(xs[a], E[0], E[1], E[2]); }
+    const t = intersectConic(Q[0], Q[1], Q[2] - zi, E[0], E[1], E[2], ctx.c[L], ctx.k[L]);
+    if (!isFinite(t)) return null;
+    return [Q[0] + t * E[0], Q[1] + t * E[1]];
+  }
+  // spot en el plano imagen desplazado dz [mm]; resultados en µm
+  function spotAt(fr, ctx, dz, wi) {
+    let sx = 0, sy = 0, sw = 0; const pts = [];
+    for (const r of fr.rays) {
+      if (wi != null && r.wi !== wi) continue;
+      const h = imgHit(ctx, r.P, r.D, dz || 0); if (!h) continue;
+      pts.push(h[0], h[1], r.w); sx += h[0] * r.w; sy += h[1] * r.w; sw += r.w;
+    }
+    if (!sw) return null;
+    const cx = sx / sw, cy = sy / sw, rr = [];
+    let s2 = 0;
+    for (let i = 0; i < pts.length; i += 3) { const d2 = (pts[i] - cx) ** 2 + (pts[i + 1] - cy) ** 2; s2 += pts[i + 2] * d2; rr.push([Math.sqrt(d2), pts[i + 2]]); }
+    rr.sort((a, b) => a[0] - b[0]);
+    let acc = 0, r80 = rr[rr.length - 1][0];
+    for (const [r, w] of rr) { acc += w; if (acc >= 0.8 * sw) { r80 = r; break; } }
+    const ch = fr.chief ? imgHit(ctx, fr.chief.P, fr.chief.D, dz || 0) : null;
+    return { cx: cx * 1000, cy: cy * 1000, rms: Math.sqrt(s2 / sw) * 1000, ee80: r80 * 1000, chief: ch ? [ch[0] * 1000, ch[1] * 1000] : null, n: rr.length };
+  }
+  // desplazamiento del plano imagen [mm] que minimiza Σ RMS² sobre los campos dados
+  function bestFocus(frs, ctx, wi, R0) {
+    const f = dz => { let s = 0; for (const fr of frs) { const sp = spotAt(fr, ctx, dz, wi); if (!sp) return 1e18; s += sp.rms * sp.rms; } return s; };
+    let R = R0 || 5, best = 0;
+    for (let pass = 0; pass < 5; pass++) {
+      const g = (Math.sqrt(5) - 1) / 2; let a = best - R, b = best + R, c = b - g * (b - a), d = a + g * (b - a), fc = f(c), fd = f(d);
+      for (let it = 0; it < 70; it++) { if (fc < fd) { b = d; d = c; fd = fc; c = b - g * (b - a); fc = f(c); } else { a = c; c = d; fc = fd; d = a + g * (b - a); fd = f(d); } }
+      const x = (a + b) / 2;
+      if (Math.abs(x - best) < 0.9 * R) { best = x; break; }
+      best = x; R *= 4;
+    }
+    return best;
+  }
+  // elementos físicos (para descentrar como sólido rígido)
+  function elements(sys) {
+    const S = sys.surfaces, L = S.length - 1, out = [];
+    const glass = i => !isMirror(S[i].mat) && glassIndex(S[i].mat, 0.55) > 1.0001;
+    let i = 1;
+    while (i < L) {
+      const s = S[i];
+      if (isMirror(s.mat)) { out.push({ name: s.cm || ('Espejo ' + i), from: i, to: i, kind: s.seg ? 'seg' : 'mirror' }); i++; continue; }
+      if (glass(i)) {
+        let j = i + 1; while (j < L && glass(j)) j++;
+        out.push({ name: (s.cm || 'Lente').replace(/\s*\((cara|face)[^)]*\)\s*$/i, '') || ('Lente ' + i), from: i, to: j, kind: 'lens' });
+        i = j + 1; continue;
+      }
+      i++;
+    }
+    return out;
   }
 
   // ---------- Solver Cassegrain (paraxial, dos espejos) ----------
@@ -786,7 +916,7 @@
 
   const API = {
     GLASS, glassIndex, isMirror, curv, sag, epd, segCenters, segAngles, segmentGap, pupilMask, apertureStats,
-    buildCtx, traceRay, fieldDir, startPt, pupilSamples, chief, paraxial, spot, opdMap, psf, fft1, fft2,
+    buildCtx, traceRay, rotXY, xfPoint, fieldRays, spotAt, bestFocus, imgHit, elements, fieldDir, startPt, pupilSamples, chief, paraxial, spot, opdMap, psf, fft1, fft2,
     cassegrain, cassegrainSurfaces, makePreset, PRESETS, zeroSegments,
     phasingModel, wfeEvaluator, closedLoop, symEig, gauss, NelderMead
   };

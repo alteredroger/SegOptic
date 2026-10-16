@@ -131,6 +131,9 @@
     s.segments = s.segments || [];
     while (s.segments.length < n) s.segments.push({ p: 0, tx: 0, ty: 0, dR: 0 });
     s.segments.length = Math.max(0, n);
+    s.perturb = Array.isArray(s.perturb) ? s.perturb : [];
+    s.req = Object.assign({ efl: 0, eflTol: 1, fnoEq: 0, fnoTol: 5, bfMin: 200, seeing: 2, budget: 0.5, uniMax: 1.25, planetary: true, strehlMin: 0.8, strehlR: 2, vigMax: 20, distMax: 1, ctMin: 1, etMin: 1 }, s.req || {});
+    s.tol = Object.assign({ els: {}, seg: { t: 1, dR: 0.2, p: 50 }, trials: 100, refocus: true }, s.tol || {});
     s.surfaces.forEach(x => { x.k = +x.k || 0; x.sd = +x.sd || 0; x.hole = +x.hole || 0; if (x.mat == null) x.mat = ''; if (x.cm == null) x.cm = ''; });
     return s;
   }
@@ -222,6 +225,12 @@
     const nv = {};
     for (const k in sys.vary) { const [i, p] = k.split(':'); const ii = +i; if (delta < 0 && ii === from) continue; nv[(ii >= from ? ii + delta : ii) + ':' + p] = sys.vary[k]; }
     sys.vary = nv;
+    // los grupos de descentrado siguen a sus superficies
+    sys.perturb = (sys.perturb || []).filter(g => {
+      if (delta > 0) { if (g.from >= from) g.from += delta; if (g.to >= from) g.to += delta; return true; }
+      if (g.from > from) g.from--; if (g.to >= from) g.to--;
+      return g.to >= g.from && g.from >= 1;
+    });
   }
   function renderLDE() {
     const T = $('#lde'); T.innerHTML = '';
@@ -278,8 +287,8 @@
 
   // ---------------- pestañas ----------------
   const TABS = [
-    ['bench', 'Banco óptico'], ['summary', 'Resumen'], ['layout', 'Layout 2D'], ['spot', 'Spot'], ['opd', 'Frente de onda'], ['psf', 'PSF / MTF'],
-    ['segments', 'Segmentos y co-faseo'], ['optim', 'Optimización'], ['tools', 'Herramientas']
+    ['bench', 'Banco óptico'], ['valid', 'Validación'], ['summary', 'Resumen'], ['layout', 'Layout 2D'], ['spot', 'Spot'], ['opd', 'Frente de onda'], ['psf', 'PSF / MTF'],
+    ['segments', 'Segmentos y co-faseo'], ['decenter', 'Descentrados'], ['optim', 'Optimización'], ['tools', 'Herramientas']
   ];
   function renderTabs() {
     const n = $('#tabs'); n.innerHTML = '';
@@ -289,7 +298,7 @@
     const P = $('#panel');
     if (ui.tab === 'bench' && bench && bench.root.isConnected) { try { bench.refresh(); } catch (e) { console.error(e); } return; }
     P.innerHTML = '';
-    try { ({ bench: tabBench, summary: tabSummary, layout: tabLayout, spot: tabSpot, opd: tabOPD, psf: tabPSF, segments: tabSegments, optim: tabOptim, tools: tabTools })[ui.tab](P); }
+    try { ({ bench: tabBench, valid: tabValid, decenter: tabDecenter, summary: tabSummary, layout: tabLayout, spot: tabSpot, opd: tabOPD, psf: tabPSF, segments: tabSegments, optim: tabOptim, tools: tabTools })[ui.tab](P); }
     catch (e) { console.error(e); P.append(h('div', { class: 'note bad' }, 'Error en el cálculo: ' + e.message)); }
   }
   function selField() {
@@ -322,6 +331,11 @@
       t += '\nErrores de segmento (p nm, tx µrad, ty µrad, ΔR mm):\n';
       sys.segments.forEach((e, i) => { t += `  S${i + 1}: ${e.p}, ${e.tx}, ${e.ty}, ${e.dR}\n`; });
     }
+    const pt = (sys.perturb || []).filter(g => g.on !== false && (g.dx || g.dy || g.dz || g.tx || g.ty));
+    if (pt.length) {
+      t += '\nDescentrados activos (Δx, Δy, Δz mm; tilt X, tilt Y °; pivote Δz mm):\n';
+      pt.forEach(g => { t += `  ${g.name || ''} [sup. ${g.from}-${g.to}]: ${g.dx}, ${g.dy}, ${g.dz}; ${g.tx}, ${g.ty}; ${g.piv}\n`; });
+    }
     return t;
   }
   function tabSummary(P) {
@@ -345,6 +359,7 @@
     if (Math.abs(last.t - par.bfl) > 0.05) notes.push(['', `El plano imagen está a ${fmt(last.t - par.bfl, 3)} mm del foco paraxial (normal si has hecho autofoco).`]);
     const sp = O.spot(ctx, sys, 0, 15);
     if (sp && sp.lostFrac > 0) notes.push(['warn', `En eje se pierde un ${fmt(sp.lostFrac * 100, 1)} % de los rayos por viñeteo (semi-diámetros / agujeros).`]);
+    if (ctx.nPert) notes.push(['warn', `Hay ${ctx.nPert} descentrado(s) activo(s): todos los análisis incluyen esos elementos desplazados (pestaña Descentrados).`]);
     notes.forEach(([c, t]) => P.append(h('div', { class: 'note ' + c }, t)));
     P.append(h('h3', null, 'Spot RMS por campo (rápido)'));
     const tb = h('table', { class: 'tbl' }, h('tr', null, h('th', null, 'Campo [°]'), h('th', null, 'RMS [µm]'), h('th', null, 'GEO [µm]'), h('th', null, 'RMS [″]'), h('th', null, 'Airy r [µm]')));
@@ -904,7 +919,8 @@
           if (s.hole > 0 && Math.abs(y) < s.hole) { pts.push(null); segOn.push(false); continue; }
           const sg = O.sag(ctx.c[i], ctx.k[i], y * y);
           if (!isFinite(sg)) { pts.push(null); segOn.push(false); continue; }
-          pts.push([ctx.z[i] + sg, y]);
+          const w = O.xfPoint(ctx, i, [0, y, ctx.z[i] + sg]);
+          pts.push([w[2], w[1]]);
           segOn.push(i === ctx.segSurf && O.pupilMask(ctx.ap, ctx.centers, 0, y) >= 0);
         }
         profs.push({ i, pts, segOn, Hh, mirror: ctx.mirror[i], img: i === L, dummy: !ctx.mirror[i] && (sys.surfaces[i - 1] ? isAir(i - 1) : true) && isAir(i) });
@@ -914,6 +930,9 @@
     function isAir(i) { const s = sys.surfaces[i]; return !s || O.isMirror(s.mat) ? true : Math.abs(O.glassIndex(s.mat, 0.55) - 1) < 1e-9; }
     function isGlass(i) { const s = sys.surfaces[i]; return s && !O.isMirror(s.mat) && O.glassIndex(s.mat, 0.55) > 1.0001; }
     function sagW(i, y) { const v = O.sag(ctx.c[i], ctx.k[i], y * y); return isFinite(v) ? ctx.z[i] + v : NaN; }
+    // punto del perfil (corte x = 0) en coordenadas mundo [z, y], con descentrados
+    function zy(i, y) { const z = sagW(i, y); if (!isFinite(z)) return null; const w = O.xfPoint(ctx, i, [0, y, z]); return [w[2], w[1]]; }
+    function P3(i, x, y) { const z = sagW(i, Math.hypot(x, y)); return isFinite(z) ? O.xfPoint(ctx, i, [x, y, z]) : null; }
 
     // --- vista ---------------------------------------------------------
     const X = z => B.W / 2 + (z - ui.v2.zc) * ui.v2.k, Y = y => B.H / 2 - (y - ui.v2.yc) * ui.v2.k;
@@ -955,15 +974,15 @@
       let zmin = Infinity, zmax = -Infinity;
       for (let i = 1; i <= L; i++) { zmin = Math.min(zmin, ctx.z[i]); zmax = Math.max(zmax, ctx.z[i]); }
       zmid3 = (zmin + zmax) / 2;
-      const ring = (cx, cy, r, i) => { const a = []; for (let k = 0; k <= 48; k++) { const t = 2 * Math.PI * k / 48, x = cx + r * Math.cos(t), y = cy + r * Math.sin(t); const z = sagW(i, Math.hypot(x, y)); if (isFinite(z)) a.push([x, y, z]); } return a; };
+      const ring = (cx, cy, r, i) => { const a = []; for (let k = 0; k <= 48; k++) { const t = 2 * Math.PI * k / 48, q = P3(i, cx + r * Math.cos(t), cy + r * Math.sin(t)); if (q) a.push(q); } return a; };
       for (let i = 1; i <= L; i++) {
         const s = sys.surfaces[i], pr = g2.profs[i - 1], lines = [], fills = [];
         if (i === ctx.segSurf) {
-          ctx.centers.forEach(c => { const rg = ring(c[0], c[1], ctx.ap.dseg / 2, i); lines.push(rg); fills.push(rg); const cr = []; for (let k = -6; k <= 6; k++) { const x = c[0] + ctx.ap.dseg / 2 * k / 6; const z = sagW(i, Math.hypot(x, c[1])); cr.push([x, c[1], z]); } lines.push(cr); });
+          ctx.centers.forEach(c => { const rg = ring(c[0], c[1], ctx.ap.dseg / 2, i); lines.push(rg); fills.push(rg); const cr = []; for (let k = -6; k <= 6; k++) { const x = c[0] + ctx.ap.dseg / 2 * k / 6; const q = P3(i, x, c[1]); if (q) cr.push(q); } lines.push(cr); });
         } else {
           const rg = ring(0, 0, pr.Hh, i); lines.push(rg); fills.push(rg);
           if (s.hole > 0) lines.push(ring(0, 0, s.hole, i));
-          for (const ax of [0, 1]) { let cur = []; for (let k = 0; k <= 40; k++) { const u = -pr.Hh + 2 * pr.Hh * k / 40; if (s.hole > 0 && Math.abs(u) < s.hole) { if (cur.length) lines.push(cur); cur = []; continue; } const z = sagW(i, u); if (isFinite(z)) cur.push(ax ? [0, u, z] : [u, 0, z]); } if (cur.length) lines.push(cur); }
+          for (const ax of [0, 1]) { let cur = []; for (let k = 0; k <= 40; k++) { const u = -pr.Hh + 2 * pr.Hh * k / 40; if (s.hole > 0 && Math.abs(u) < s.hole) { if (cur.length) lines.push(cur); cur = []; continue; } const q = ax ? P3(i, 0, u) : P3(i, u, 0); if (q) cur.push(q); } if (cur.length) lines.push(cur); }
         }
         lines.forEach(l => l.forEach(p => all.push(p)));
         surfs.push({ i, lines, fills, mirror: ctx.mirror[i], img: i === L });
@@ -1014,7 +1033,7 @@
       for (let i = 1; i < L; i++) {
         if (!isGlass(i)) continue;
         const a = G.profs[i - 1], b = G.profs[i], Hh = Math.min(a.Hh, b.Hh), hole = Math.max(sys.surfaces[i].hole || 0, sys.surfaces[i + 1].hole || 0);
-        const side = (sgn) => { g.beginPath(); let first = true; for (let k = 0; k <= 60; k++) { const y = sgn * (hole + (Hh - hole) * k / 60); const z = sagW(i, y); if (!isFinite(z)) continue; first ? g.moveTo(X(z), Y(y)) : g.lineTo(X(z), Y(y)); first = false; } for (let k = 60; k >= 0; k--) { const y = sgn * (hole + (Hh - hole) * k / 60); const z = sagW(i + 1, y); if (!isFinite(z)) continue; g.lineTo(X(z), Y(y)); } g.closePath(); g.fill(); };
+        const side = (sgn) => { g.beginPath(); let first = true; for (let k = 0; k <= 60; k++) { const y = sgn * (hole + (Hh - hole) * k / 60); const q = zy(i, y); if (!q) continue; first ? g.moveTo(X(q[0]), Y(q[1])) : g.lineTo(X(q[0]), Y(q[1])); first = false; } for (let k = 60; k >= 0; k--) { const y = sgn * (hole + (Hh - hole) * k / 60); const q = zy(i + 1, y); if (!q) continue; g.lineTo(X(q[0]), Y(q[1])); } g.closePath(); g.fill(); };
         g.fillStyle = css('--acc2'); g.globalAlpha = 0.16; side(1); side(-1); g.globalAlpha = 1;
       }
       // rayos
@@ -1050,10 +1069,10 @@
       if (ui.sel != null) {
         const i = ui.sel, s = sys.surfaces[i], p = G.profs[i - 1];
         if (p) {
-          const vx = X(ctx.z[i]), vy = Y(0);
+          const v0 = zy(i, 0) || [ctx.z[i], 0], vx = X(v0[0]), vy = Y(v0[1]);
           g.fillStyle = css('--acc'); g.fillRect(vx - 5, vy - 5, 10, 10);
           const Hh = p.Hh;
-          for (const sg of [1, -1]) { const z = sagW(i, Hh); if (!isFinite(z)) continue; g.beginPath(); g.arc(X(z), Y(sg * Hh), 5.5, 0, 2 * Math.PI); g.fillStyle = s.sd > 0 ? css('--acc') : css('--bg2'); g.fill(); g.strokeStyle = css('--acc'); g.lineWidth = 1.5; g.stroke(); }
+          for (const sg of [1, -1]) { const q = zy(i, sg * Hh); if (!q) continue; g.beginPath(); g.arc(X(q[0]), Y(q[1]), 5.5, 0, 2 * Math.PI); g.fillStyle = s.sd > 0 ? css('--acc') : css('--bg2'); g.fill(); g.strokeStyle = css('--acc'); g.lineWidth = 1.5; g.stroke(); }
         }
       }
       // escala
@@ -1098,6 +1117,7 @@
         ['Spot RMS ' + fmt(f0.y, 3) + '°', s0 ? fmt(s0.rms, 2) + ' µm' : '—']];
       if (s1) items.push(['Spot RMS ' + fmt(fl.y, 3) + '°', fmt(s1.rms, 2) + ' µm']);
       if (s0) items.push(['Viñeteo eje', fmt(s0.lostFrac * 100, 1) + ' %']);
+      if (ctx.nPert) items.push(['Descentrados activos', String(ctx.nPert)]);
       items.forEach(([k, v]) => live.append(h('span', null, k + ' ', h('b', null, v))));
     }
 
@@ -1112,8 +1132,9 @@
     function handleHit(p) {
       if (ui.sel == null || !B.geo) return null;
       const i = ui.sel, pr = B.geo.profs[i - 1]; if (!pr) return null;
-      if (Math.hypot(p.x - X(ctx.z[i]), p.y - Y(0)) < 9) return { type: 'move', i };
-      for (const sg of [1, -1]) { const z = sagW(i, pr.Hh); if (isFinite(z) && Math.hypot(p.x - X(z), p.y - Y(sg * pr.Hh)) < 9) return { type: 'sd', i }; }
+      const v0 = zy(i, 0) || [ctx.z[i], 0];
+      if (Math.hypot(p.x - X(v0[0]), p.y - Y(v0[1])) < 9) return { type: 'move', i };
+      for (const sg of [1, -1]) { const q = zy(i, sg * pr.Hh); if (q && Math.hypot(p.x - X(q[0]), p.y - Y(q[1])) < 9) return { type: 'sd', i }; }
       return null;
     }
     function insertTarget(p) {
@@ -1251,7 +1272,7 @@
       const s = S[i], isImg = i === L;
       if (!B.geo) B.geo = computeGeo();
       const kind = s.seg ? 'Espejo segmentado' : O.isMirror(s.mat) ? 'Espejo' : isImg ? 'Imagen' : isGlass(i) ? 'Refractiva (entra en vidrio)' : isGlass(i - 1) ? 'Refractiva (sale del vidrio)' : 'Ficticia / aire';
-      insp.append(h('h3', null, (isImg ? 'Imagen' : 'Superficie ' + i) + ' ', h('span', { class: 'badge' }, kind)));
+      insp.append(h('h3', null, (isImg ? 'Imagen' : 'Superficie ' + i) + ' ', h('span', { class: 'badge' }, kind), ctx.xf[i] ? h('span', { class: 'badge warnb' }, 'descentrada') : null));
       const cm = h('input', { type: 'text', value: s.cm || '', class: 'wide', onchange: e => { s.cm = e.target.value; changed({ lde: true }); } });
       insp.append(cm);
       const grid = h('div', { class: 'insgrid' }); insp.append(grid);
@@ -1303,6 +1324,11 @@
       if (!isImg) acts.append(h('button', { class: 'small', onclick: () => { s.r = isFinite(s.r) ? -s.r : Infinity; changed({ lde: true, now: true }); } }, 'Invertir radio'));
       acts.append(h('button', { class: 'small', onclick: () => { s.r = Infinity; changed({ lde: true, now: true }); } }, 'Hacer plana'));
       if (!isImg && i > 0) acts.append(h('button', { class: 'small', onclick: () => B.deleteSel() }, 'Eliminar'));
+      if (!isImg) acts.append(h('button', { class: 'small', title: 'Crea un descentrado para el elemento que contiene esta superficie', onclick: () => {
+        const e = O.elements(sys).find(x => x.from <= i && i <= x.to) || { name: s.cm || ('Sup. ' + i), from: i, to: i };
+        if (!sys.perturb.some(g => g.from === e.from && g.to === e.to)) sys.perturb.push({ on: true, name: e.name, from: e.from, to: e.to, dx: 0, dy: 0, dz: 0, tx: 0, ty: 0, piv: 0 });
+        ui.tab = 'decenter'; renderTabs(); changed({ now: true });
+      } }, 'Descentrar elemento…'));
       acts.append(h('button', { class: 'small', title: 'Marca radio/espesor/cónica como variables de optimización', onclick: () => { sys.vary[i + ':r'] = true; if (!isImg) sys.vary[i + ':t'] = true; changed({ lde: true }); } }, 'Marcar como variables'));
       insp.append(acts);
     }
@@ -1317,6 +1343,428 @@
     };
     if (ui.insert) B.setInsert(ui.insert);
     requestAnimationFrame(() => B.refresh());
+  }
+
+  // ---------------- evaluación común (descentrados / validación) ----------------
+  function cloneSys(s) { return jsonIn(jsonOut(s)); }
+  function nominalOf(s, keepSeg) { const n = cloneSys(s); n.perturb = []; if (!keepSeg) n.segments = n.segments.map(() => ({ p: 0, tx: 0, ty: 0, dR: 0 })); return n; }
+  const diffCache = new Map();
+  // diámetro EE80 limitado por difracción [µm] (pupila real, λ primaria)
+  function diffEE80(s) {
+    const c = O.buildCtx(s), p = O.paraxial(c, s); if (!p) return 0;
+    const wl = s.wavelengths[s.primary].wl;
+    const key = JSON.stringify(s.aperture) + '|' + p.fno.toFixed(4) + '|' + wl;
+    if (diffCache.has(key)) return diffCache.get(key);
+    let d = 0;
+    try { const r = O.psf(c, nominalOf(s), 0, wl, 64, 4, 64); if (r) { const k = r.ee.ref.findIndex(v => v >= 0.8); d = k >= 0 ? 2 * r.ee.r[k] : 0; } } catch (e) { d = 0; }
+    diffCache.set(key, d); return d;
+  }
+  function evalDesign(s, o) {
+    o = o || {};
+    const c = O.buildCtx(s), p = O.paraxial(c, s);
+    const fields = o.fields || s.fields.map(f => f.y);
+    const frs = fields.map(y => O.fieldRays(c, s, y, o.N || 13));
+    let dz = 0;
+    if (o.refocus) dz = O.bestFocus(frs, c, null, o.range || 2);
+    const sp = frs.map(fr => O.spotAt(fr, c, dz));
+    const res = { c, par: p, frs, dz, sp, fields };
+    if (o.opd) {
+      // WFE en eje: si hay compensador, se enfoca en el eje (uso planetario)
+      let s2 = s, c2 = c, dzA = 0;
+      if (o.refocus) { let k = 0; fields.forEach((y, i) => { if (Math.abs(y) < Math.abs(fields[k])) k = i; }); dzA = O.bestFocus([frs[k]], c, null, o.range || 2); }
+      if (dzA) { s2 = cloneSys(s); s2.surfaces[s2.surfaces.length - 2].t += dzA; c2 = O.buildCtx(s2); }
+      const wl = s.wavelengths[s.primary].wl, om = O.opdMap(c2, s2, 0, wl, o.opdN || 32, true);
+      res.wfe = om ? om.rms * wl * 1000 : NaN;
+    }
+    return res;
+  }
+  const eeTot = (sp, diff) => sp ? Math.hypot(2 * sp.ee80, diff || 0) : NaN; // diámetro EE80 con difracción [µm]
+  const eeG = sp => sp ? 2 * sp.ee80 : NaN; // diámetro EE80 geométrico (aberraciones del diseño) [µm]
+  const seeEE = () => 1.524 * sys.req.seeing; // Ø EE80 de un seeing gaussiano de FWHM dado [″]
+  // peor EE80 geométrico [″] (criterio de diseño: la difracción de la pupila se trata aparte)
+  function worstEE(res, diff, plate) { let w = 0; res.sp.forEach(sp => { const v = eeG(sp); w = Math.max(w, isFinite(v) ? v : Infinity); }); return w * plate / 1000; }
+  function axisIdx(res) { let k = 0; res.fields.forEach((y, i) => { if (Math.abs(y) < Math.abs(res.fields[k])) k = i; }); return k; }
+  function chiefShift(res, ref) { const a = res.sp[axisIdx(res)], b = ref.sp[axisIdx(ref)]; if (!a || !b || !a.chief || !b.chief) return NaN; return Math.hypot(a.chief[0] - b.chief[0], a.chief[1] - b.chief[1]); }
+  function budget() { const R = sys.req; return R.seeing * R.budget; }
+  const PERT_P = [['dy', 'Descentrado Y [mm]', 0.5], ['dx', 'Descentrado X [mm]', 0.5], ['dz', 'Desplazamiento axial Δz [mm]', 0.5], ['tx', 'Tilt alrededor de X [°]', 0.1], ['ty', 'Tilt alrededor de Y [°]', 0.1]];
+
+  // ---------------- pestaña Descentrados ----------------
+  function tabDecenter(P) {
+    const els = O.elements(sys), L = sys.surfaces.length - 1, PT = sys.perturb;
+    P.append(h('p', { class: 'hint' }, 'Cada fila mueve un grupo de superficies (un espejo, una lente o cualquier rango) como un sólido rígido: descentrado Δx/Δy, desplazamiento axial Δz (sin mover el resto del sistema) e inclinaciones alrededor de X/Y respecto a un pivote situado en el vértice de la primera superficie + «pivote Δz». ',
+      h('b', null, 'Mientras estén activos se aplican a todos los análisis'), ' (spot, frente de onda, PSF, banco óptico…).'));
+    const selEl = h('select', null, els.map((e, k) => h('option', { value: k }, `${e.name} (sup. ${e.from}${e.to !== e.from ? '–' + e.to : ''})`)));
+    const fromIn = h('input', { type: 'number', value: 1, min: 1, max: L, step: 1, style: 'width:64px' }), toIn = h('input', { type: 'number', value: Math.max(1, L - 1), min: 1, max: L, step: 1, style: 'width:64px' });
+    const add = (name, a, b) => { a = Math.max(1, Math.min(L, a | 0)); b = Math.max(a, Math.min(L, b | 0)); PT.push({ on: true, name, from: a, to: b, dx: 0, dy: 0, dz: 0, tx: 0, ty: 0, piv: 0 }); changed({ now: true }); };
+    P.append(h('div', { class: 'ctrl' },
+      h('label', null, 'Elemento', selEl), h('button', { disabled: !els.length, onclick: () => { const e = els[+selEl.value]; if (e) add(e.name, e.from, e.to); } }, 'Añadir descentrado'),
+      h('span', { class: 'lbl' }, '· grupo libre: sup.'), fromIn, h('span', { class: 'lbl' }, 'a'), toIn,
+      h('button', { onclick: () => add('Grupo ' + fromIn.value + '–' + toIn.value, +fromIn.value, +toIn.value) }, 'Añadir grupo')));
+    if (PT.length) {
+      const t = h('table', { class: 'tbl' }, h('tr', null, ['Act.', 'Nombre', 'De', 'A', 'Δx [mm]', 'Δy [mm]', 'Δz [mm]', 'Tilt X [°]', 'Tilt Y [°]', 'Pivote Δz [mm]', ''].map(x => h('th', null, x))));
+      PT.forEach((g, k) => {
+        const n = (key, step) => num(g[key], v => { if (isFinite(v)) { g[key] = v; changed({}); } }, step);
+        const R1 = sys.surfaces[g.from] ? sys.surfaces[g.from].r : Infinity;
+        t.append(h('tr', null,
+          h('td', null, h('input', { type: 'checkbox', checked: g.on !== false, onchange: e => { g.on = e.target.checked; changed({}); } })),
+          h('td', null, h('input', { type: 'text', value: g.name || '', style: 'width:150px', onchange: e => { g.name = e.target.value; save(); } })),
+          h('td', null, num(g.from, v => { g.from = Math.max(1, Math.min(L, v | 0)); if (g.to < g.from) g.to = g.from; changed({}); }, 1)),
+          h('td', null, num(g.to, v => { g.to = Math.max(g.from, Math.min(L, v | 0)); changed({}); }, 1)),
+          h('td', null, n('dx', 0.01)), h('td', null, n('dy', 0.01)), h('td', null, n('dz', 0.01)), h('td', null, n('tx', 0.005)), h('td', null, n('ty', 0.005)),
+          h('td', null, h('div', { class: 'cellv' }, n('piv', 1), isFinite(R1) ? h('button', { class: 'small', title: 'Pivote en el centro de curvatura (R = ' + fmt(R1, 2) + ')', onclick: () => { g.piv = R1; changed({}); } }, 'CC') : null)),
+          h('td', null, h('button', { class: 'small', onclick: () => { PT.splice(k, 1); changed({ now: true }); } }, '×'))));
+      });
+      P.append(h('div', { class: 'wrapx' }, t));
+      P.append(h('div', { class: 'ctrl' }, h('button', { onclick: () => { PT.forEach(g => g.on = false); changed({ now: true }); } }, 'Desactivar todos'), h('button', { onclick: () => { PT.forEach(g => { g.dx = g.dy = g.dz = g.tx = g.ty = 0; }); changed({ now: true }); } }, 'Poner a cero')));
+    } else P.append(h('div', { class: 'note' }, 'No hay descentrados definidos. Añade uno arriba (o desde el inspector del Banco óptico).'));
+
+    // efecto
+    P.append(h('h3', null, 'Efecto de los descentrados activos (frente al diseño sin descentrar)'));
+    const eff = h('div'); P.append(eff);
+    if (!ctx.nPert) eff.append(h('p', { class: 'hint' }, 'No hay descentrados activos con valores distintos de cero.'));
+    else defer(eff, 'Evaluando…', () => {
+      const nom = nominalOf(sys, true), o = { N: 15, opd: true };
+      const A = evalDesign(nom, o), Af = evalDesign(nom, Object.assign({ refocus: true }, o)), B0 = evalDesign(sys, o), Bf = evalDesign(sys, Object.assign({ refocus: true }, o));
+      if (!A.par || !B0.par) { eff.append(h('div', { class: 'note bad' }, 'El sistema paraxial falla.')); return; }
+      const diff = diffEE80(nom), pl = A.par.plate, sh = chiefShift(B0, A);
+      const st = h('div', { class: 'stats' });
+      st.append(stat('Desplazamiento de la imagen (eje)', fmt(sh, 1) + ' <small>µm</small> · ' + fmt(sh * pl / 1000, 2) + ' <small>″</small>'));
+      st.append(stat('Reenfoque necesario', fmt(Bf.dz, 3) + ' <small>mm</small>'));
+      st.append(stat('ΔEFL', fmt(B0.par.efl - A.par.efl, 3) + ' <small>mm</small>'));
+      st.append(stat('WFE eje (enfocado en eje)', fmt(Af.wfe, 1) + ' → ' + fmt(Bf.wfe, 1) + ' <small>nm</small>'));
+      st.append(stat('EE80 geom. peor campo (reenfocado)', fmt(worstEE(Af, diff, pl), 2) + ' → ' + fmt(worstEE(Bf, diff, pl), 2) + ' <small>″</small>', worstEE(Bf, diff, pl) <= Math.max(budget(), 1.1 * worstEE(Af, diff, pl)) ? 'ok' : 'ko'));
+      eff.append(st);
+      const t = h('table', { class: 'tbl' }, h('tr', null, ['Campo [°]', 'RMS nominal [µm]', 'RMS descentrado [µm]', 'RMS + reenfoque [µm]', 'EE80 geom. nominal reenfocado [″]', 'EE80 geom. descentrado + reenfoque [″]'].map(x => h('th', null, x))));
+      A.fields.forEach((y, k) => t.append(h('tr', null, h('td', null, fmt(y, 3)), h('td', null, fmt(A.sp[k] && A.sp[k].rms, 2)), h('td', null, fmt(B0.sp[k] && B0.sp[k].rms, 2)), h('td', null, fmt(Bf.sp[k] && Bf.sp[k].rms, 2)),
+        h('td', null, fmt(eeG(Af.sp[k]) * pl / 1000, 3)), h('td', null, fmt(eeG(Bf.sp[k]) * pl / 1000, 3)))));
+      eff.append(h('div', { class: 'wrapx' }, t));
+      eff.append(h('p', { class: 'hint' }, 'El desplazamiento de la imagen es error de apuntado (se corrige con la montura/guiado); el aumento de EE80 tras reenfocar es la degradación real de la imagen (sobre todo coma por descentrado/inclinación).'));
+    });
+
+    // barrido
+    P.append(h('h3', null, 'Barrido de sensibilidad'));
+    const sw = ui.sweep = ui.sweep || { el: 1, p: 'dy', R: 0.5, n: 11, piv: 0, refocus: true };
+    const elSel = h('select', { onchange: e => { sw.el = +e.target.value; } }, els.map((e, k) => h('option', { value: k, selected: sw.el === k }, e.name)));
+    const pSel = h('select', { onchange: e => { sw.p = e.target.value; const d = PERT_P.find(x => x[0] === sw.p); sw.R = d[2]; rIn.value = sw.R; } }, PERT_P.map(([k, t]) => h('option', { value: k, selected: sw.p === k }, t)));
+    const rIn = num(sw.R, v => sw.R = Math.abs(v)), pivIn = num(sw.piv, v => sw.piv = v || 0);
+    P.append(h('div', { class: 'ctrl' }, h('label', null, 'Elemento', elSel), h('label', null, 'Parámetro', pSel), h('label', null, 'Rango ±', rIn),
+      h('label', null, 'Pasos', num(sw.n, v => sw.n = Math.max(3, Math.min(41, Math.round(v))), 2)), h('label', null, 'Pivote Δz [mm]', pivIn),
+      h('label', null, h('input', { type: 'checkbox', checked: sw.refocus, onchange: e => sw.refocus = e.target.checked }), 'Reenfocar'),
+      h('button', { class: 'primary', disabled: !els.length, onclick: () => runSweep() }, 'Barrer')));
+    P.append(h('p', { class: 'hint' }, 'El barrido parte del sistema actual sin el descentrado propio de ese elemento (los demás descentrados activos se mantienen).'));
+    const out = h('div'); P.append(out);
+    function runSweep() {
+      out.innerHTML = '';
+      const e = els[sw.el] || els[0]; if (!e) return;
+      const base = cloneSys(sys); base.perturb = base.perturb.filter(g => !(g.from === e.from && g.to === e.to));
+      const nom = evalDesign(base, { N: 13, refocus: sw.refocus });
+      if (!nom.par) return;
+      const diff = diffEE80(base), pl = nom.par.plate, xs = [], ee = [], sh = [], dzs = [], perF = base.fields.map(() => []);
+      for (let k = 0; k < sw.n; k++) {
+        const v = -sw.R + 2 * sw.R * k / (sw.n - 1), s = cloneSys(base);
+        s.perturb.push({ on: true, from: e.from, to: e.to, dx: 0, dy: 0, dz: 0, tx: 0, ty: 0, piv: sw.piv, [sw.p]: v });
+        const r = evalDesign(s, { N: 13, refocus: sw.refocus });
+        xs.push(v); ee.push(worstEE(r, diff, pl)); sh.push(chiefShift(r, nom) * pl / 1000); dzs.push(r.dz);
+        r.sp.forEach((sp, f) => perF[f].push(eeG(sp) * pl / 1000));
+      }
+      const B = budget(), W = Math.min(720, Math.max(300, P.clientWidth - 10));
+      const c1 = h('canvas'), c2 = h('canvas');
+      out.append(c1, legend([[SER[0], 'peor campo']].concat(base.fields.map((f, i) => [SER[(i + 1) % SER.length], 'campo ' + fmt(f.y, 3) + '°']))));
+      lineChart(c1, { w: W, h: 280, series: [{ x: xs, y: ee, width: 2.6 }].concat(perF.map((y, i) => ({ x: xs, y, color: SER[(i + 1) % SER.length], dash: [4, 3], width: 1.2 }))), xlab: (PERT_P.find(x => x[0] === sw.p) || [])[1], ylab: 'EE80 geom. Ø [″]', ymin: 0, hlines: [{ y: B, label: 'presupuesto ' + fmt(B, 2) + '″', color: css('--good') }] });
+      out.append(c2, legend([[SER[1], 'desplazamiento de imagen [″]'], [SER[2], 'reenfoque [mm]']]));
+      lineChart(c2, { w: W, h: 220, series: [{ x: xs, y: sh, color: SER[1] }, { x: xs, y: dzs, color: SER[2] }], xlab: (PERT_P.find(x => x[0] === sw.p) || [])[1], ylab: '″ / mm' });
+      // tolerancia para el presupuesto (por interpolación)
+      const mid = Math.floor((sw.n - 1) / 2), rel = ee[mid] > B, thr = rel ? ee[mid] * 1.1 : B; let tolP = NaN, tolN = NaN;
+      for (let k = mid; k < sw.n - 1; k++) if (ee[k] <= thr && ee[k + 1] > thr) { tolP = xs[k] + (thr - ee[k]) / (ee[k + 1] - ee[k]) * (xs[k + 1] - xs[k]); break; }
+      for (let k = mid; k > 0; k--) if (ee[k] <= thr && ee[k - 1] > thr) { tolN = xs[k] + (thr - ee[k]) / (ee[k - 1] - ee[k]) * (xs[k - 1] - xs[k]); break; }
+      const crit = rel ? `degradación ≤ 10 % sobre el nominal (EE80 ≤ ${fmt(thr, 2)}″; el nominal ya supera el presupuesto de ${fmt(B, 2)}″)` : `EE80 geométrico ≤ ${fmt(B, 2)}″ en todo el campo`;
+      const msg = (isFinite(tolP) || isFinite(tolN)) ? `Para mantener ${crit}: ${isFinite(tolN) ? fmt(tolN, 4) : '< ' + fmt(-sw.R, 3)} … ${isFinite(tolP) ? '+' + fmt(tolP, 4) : '> ' + fmt(sw.R, 3)} (este parámetro solo, ${sw.refocus ? 'con' : 'sin'} reenfoque).`
+        : `Dentro de ±${fmt(sw.R, 3)} se mantiene ${crit}: amplía el rango para encontrar el límite.`;
+      out.append(h('div', { class: 'note' }, msg));
+    }
+  }
+
+  // ---------------- pestaña Validación ----------------
+  const ST = { ok: ['✓', 'ok', 'Cumple'], warn: ['!', 'wa', 'Revisar'], fail: ['✗', 'ko', 'No cumple'], info: ['i', '', 'Info'] };
+  function pill(st) { const d = ST[st] || ST.info; return h('span', { class: 'pill ' + st, title: d[2] }, d[0] + ' ' + d[2]); }
+  function tolFor(e) {
+    const k = e.from + '-' + e.to, d = e.kind === 'lens' ? { dec: 0.05, tilt: 0.02, dz: 0.1 } : { dec: 0.1, tilt: 0.02, dz: 0.1 };
+    return Object.assign(d, sys.tol.els[k] || {});
+  }
+  function sysHash() { const t = jsonOut(Object.assign({}, sys, { name: '' })); let h0 = 0; for (let i = 0; i < t.length; i++) h0 = (h0 * 31 + t.charCodeAt(i)) | 0; return h0; }
+
+  function tabValid(P) {
+    const R = sys.req;
+    // requisitos
+    const det = h('details', { class: 'req', open: ui.reqOpen || false, ontoggle: e => { ui.reqOpen = e.target.open; } }, h('summary', null, 'Requisitos y criterios (editar)'));
+    const rq = h('div', { class: 'reqgrid' });
+    const fld = (lab, key, step, unit, hint) => rq.append(h('label', null, lab, hint ? h('span', { class: 'hint' }, ' ' + hint) : null), h('div', { class: 'insrow' }, num(R[key], v => { if (isFinite(v)) { R[key] = v; changed({}); } }, step), h('span', { class: 'u' }, unit || '')));
+    fld('EFL objetivo', 'efl', 1, 'mm', '(0 = objetivo del optimizador)'); fld('Tolerancia EFL', 'eflTol', 0.1, '%');
+    fld('F/# equivalente objetivo', 'fnoEq', 0.1, '', '(0 = libre)'); fld('Tolerancia F/#', 'fnoTol', 0.5, '%');
+    fld('Foco mínimo tras el vértice del primario', 'bfMin', 5, 'mm', '(enfocador + rueda + cámara)');
+    fld('Seeing (FWHM)', 'seeing', 0.1, '″'); fld('Fracción del seeing para la óptica (EE80 Ø)', 'budget', 0.05, '');
+    fld('Uniformidad máx. borde/centro', 'uniMax', 0.1, '×'); fld('Viñeteo máx. en el borde', 'vigMax', 1, '%');
+    fld('Distorsión máx.', 'distMax', 0.1, '%'); fld('Strehl mín. (planetaria)', 'strehlMin', 0.05, '');
+    fld('Radio del campo central (planetaria)', 'strehlR', 0.5, 'mm'); fld('Espesor mín. centro (vidrio)', 'ctMin', 0.5, 'mm'); fld('Espesor mín. borde (vidrio)', 'etMin', 0.5, 'mm');
+    rq.append(h('label', null, 'Evaluar planetaria'), h('div', null, h('input', { type: 'checkbox', checked: !!R.planetary, onchange: e => { R.planetary = e.target.checked; changed({}); } })));
+    det.append(rq); P.append(det);
+    const body = h('div'); P.append(body);
+    defer(body, 'Validando diseño…', () => runValidation(body));
+  }
+
+  function runValidation(P) {
+    const R = sys.req, L = ctx.L, wlp = sys.wavelengths[sys.primary].wl;
+    if (!par) { P.append(h('div', { class: 'note bad' }, 'El sistema paraxial falla: no se puede validar.')); return; }
+    const pl = par.plate, umA = 1000 / pl, B = budget(), Bum = B * umA;
+    const reqEfl = R.efl > 0 ? R.efl : (sys.merit.eflTarget > 0 ? sys.merit.eflTarget : par.efl);
+    const reqF = R.fnoEq > 0 ? R.fnoEq : par.fnoEq;
+    const diff = diffEE80(sys);
+    const fieldsQ = sys.fields.map(f => f.y).sort((a, b) => Math.abs(a) - Math.abs(b));
+    const maxF = Math.abs(fieldsQ[fieldsQ.length - 1]);
+    const checks = [], add = (st, name, val, tgt, note) => checks.push({ st, name, val, tgt, note });
+
+    // calidad de imagen en el plano configurado
+    const frs = fieldsQ.map(y => O.fieldRays(ctx, sys, y, 17));
+    const sEE = seeEE(), dA = diff / umA;
+    const q = frs.map(fr => { const sp = O.spotAt(fr, ctx, 0); const ee = eeG(sp), eeA = ee / umA; return { y: fr.field, sp, ee, eeA, del: Math.sqrt(sEE * sEE + dA * dA + eeA * eeA), vig: fr.lostFrac, h: fr.chief ? (O.imgHit(ctx, fr.chief.P, fr.chief.D, 0) || [0, NaN])[1] : NaN }; });
+    const worst = Math.max(...q.map(x => isFinite(x.eeA) ? x.eeA : Infinity)), uni = q[q.length - 1].del / q[0].del;
+    // curvatura de campo
+    const NF = 7, fc = [...Array(NF)].map((_, k) => maxF * k / (NF - 1)) ;
+    const frc = fc.map(y => O.fieldRays(ctx, sys, y, 13));
+    const fz = frc.map(fr => O.bestFocus([fr], ctx, null, 2));
+    const hImg = frc.map(fr => fr.chief ? ((O.imgHit(ctx, fr.chief.P, fr.chief.D, 0) || [0, NaN])[1]) : NaN);
+    const spN = frc.map(fr => O.spotAt(fr, ctx, 0)), spB = frc.map((fr, k) => O.spotAt(fr, ctx, fz[k]));
+    const fRange = Math.max(...fz) - Math.min(...fz), DOF = Math.abs(par.fno) * Bum / 1000;
+    let a2 = NaN; { let Sx = 0, Sy = 0, Sxx = 0, Sxy = 0, n = 0; hImg.forEach((hh, k) => { if (!isFinite(hh)) return; const x = hh * hh; Sx += x; Sy += fz[k]; Sxx += x * x; Sxy += x * fz[k]; n++; }); const den = n * Sxx - Sx * Sx; if (n > 2 && Math.abs(den) > 1e-12) a2 = (n * Sxy - Sx * Sy) / den; }
+    const Rfield = isFinite(a2) && Math.abs(a2) > 1e-12 ? 1 / (2 * a2) : Infinity;
+    const dzAll = O.bestFocus(frs, ctx, null, 2);
+    // color axial y lateral
+    const fr0 = frs[0], fzW = sys.wavelengths.map((w, wi) => O.bestFocus([fr0], ctx, wi, 2)), axSpread = Math.max(...fzW) - Math.min(...fzW);
+    const frE = frs[frs.length - 1], cen = sys.wavelengths.map((w, wi) => O.spotAt(frE, ctx, 0, wi));
+    let latSep = 0; cen.forEach(a => cen.forEach(b => { if (a && b) latSep = Math.max(latSep, Math.hypot(a.cx - b.cx, a.cy - b.cy)); }));
+    // distorsión e iluminación relativa
+    const th0 = Math.max(1e-5, maxF * 1e-3), ch0 = O.chief(ctx, th0, wlp), k0 = ch0.ok ? ch0.P[1] / Math.tan(th0 * Math.PI / 180) : NaN;
+    const dist = fc.map((y, k) => k === 0 ? 0 : (hImg[k] / (k0 * Math.tan(y * Math.PI / 180)) - 1) * 100);
+    const RI = frc.map(fr => (1 - fr.lostFrac) / Math.max(1e-9, 1 - frc[0].lostFrac));
+    const vigEdge = (1 - RI[RI.length - 1]) * 100;
+    // Strehl en el campo central
+    let strehl = NaN, wfeC = [];
+    if (R.planetary) {
+      const thc = Math.atan(R.strehlR / Math.abs(par.efl)) * 180 / Math.PI;
+      [0, Math.min(thc, maxF || thc)].forEach(t => { const om = O.opdMap(ctx, sys, t, wlp, 48, true); if (om) wfeC.push({ t, rms: om.rms, nm: om.rms * wlp * 1000, S: om.strehlM }); });
+      strehl = Math.min(...wfeC.map(x => x.S));
+    }
+    // fabricabilidad
+    const fab = [], S = sys.surfaces;
+    const glass = i => !O.isMirror(S[i].mat) && O.glassIndex(S[i].mat, 0.55) > 1.0001;
+    const sg = (i, hh) => O.sag(ctx.c[i], ctx.k[i], hh * hh);
+    for (let i = 1; i < L; i++) {
+      const s = S[i], m = String(s.mat || '').trim();
+      if (m && !O.isMirror(m) && !(O.glassIndex(m, wlp) > 0)) fab.push({ st: 'fail', what: `Sup. ${i}: material «${m}» desconocido`, val: '—', tgt: 'catálogo / nd/Vd' });
+      if (isFinite(s.r) && s.sd > 0 && s.sd >= Math.abs(s.r)) fab.push({ st: 'fail', what: `Sup. ${i}: semi-Ø ≥ |R|`, val: fmt(s.sd, 2) + ' mm', tgt: '< ' + fmt(Math.abs(s.r), 2) });
+      if (glass(i)) {
+        const t = s.t, sgn = Math.sign(t) || 1, hh = Math.max(s.sd || 0, S[i + 1].sd || 0);
+        fab.push({ st: Math.abs(t) >= R.ctMin ? 'ok' : 'fail', what: `Sup. ${i}–${i + 1} (${(s.cm || m).slice(0, 26)}): espesor en el centro`, val: fmt(Math.abs(t), 3) + ' mm', tgt: '≥ ' + R.ctMin });
+        if (hh > 0) { const et = sgn * (t + sg(i + 1, hh) - sg(i, hh)); fab.push({ st: !isFinite(et) ? 'fail' : et >= R.etMin ? 'ok' : et > 0 ? 'warn' : 'fail', what: `Sup. ${i}–${i + 1}: espesor en el borde (h = ${fmt(hh, 1)})`, val: fmt(et, 3) + ' mm', tgt: '≥ ' + R.etMin }); }
+        else fab.push({ st: 'warn', what: `Sup. ${i}–${i + 1}: sin semi-Ø definido`, val: '—', tgt: 'definir semi-Ø' });
+      } else if (!O.isMirror(m) && i + 1 < L && (glass(i + 1) || (i > 1 && glass(i - 1))) && s.sd > 0 && S[i + 1].sd > 0) {
+        const t = s.t, sgn = Math.sign(t) || 1, hh = Math.min(s.sd, S[i + 1].sd), gap = sgn * (t + sg(i + 1, hh) - sg(i, hh));
+        if (isFinite(gap)) fab.push({ st: gap >= 0 ? 'ok' : 'fail', what: `Sup. ${i}–${i + 1}: separación de aire en el borde`, val: fmt(gap, 3) + ' mm', tgt: '≥ 0' });
+      }
+    }
+    const fabSt = fab.some(x => x.st === 'fail') ? 'fail' : fab.some(x => x.st === 'warn') ? 'warn' : 'ok';
+    const bf = ctx.z[L] - ctx.z[1];
+
+    // ---- lista de comprobaciones ----
+    const eflDev = Math.abs(par.efl - reqEfl) / Math.abs(reqEfl) * 100;
+    add(eflDev <= R.eflTol ? 'ok' : 'fail', 'Focal efectiva', fmt(par.efl, 2) + ' mm', fmt(reqEfl, 1) + ' ± ' + R.eflTol + ' %');
+    const fDev = Math.abs(par.fnoEq - reqF) / reqF * 100;
+    add(fDev <= R.fnoTol ? 'ok' : 'warn', 'F/# equivalente', 'f/' + fmt(par.fnoEq, 3), 'f/' + fmt(reqF, 2) + ' ± ' + R.fnoTol + ' %');
+    add(bf >= R.bfMin ? 'ok' : 'fail', 'Foco tras el vértice del primario', fmt(bf, 1) + ' mm', '≥ ' + R.bfMin + ' mm');
+    add(worst <= B ? 'ok' : worst <= 1.5 * B ? 'warn' : 'fail', 'EE80 geométrico (Ø) en el peor campo', fmt(worst, 2) + '″', '≤ ' + fmt(B, 2) + '″ (' + fmt(R.budget * 100, 0) + ' % del seeing)', 'Aberraciones del diseño. Imagen entregada estimada en el borde (seeing + difracción + diseño): ' + fmt(q[q.length - 1].del, 2) + '″.');
+    add('info', 'Límite de difracción de la pupila (EE80 Ø)', fmt(dA, 2) + '″', '—', 'Inherente a la apertura en anillo (lo fija sobre todo el Ø de cada segmento); no se optimiza con el diseño óptico.');
+    add(uni <= R.uniMax ? 'ok' : 'warn', 'Uniformidad de la imagen entregada (borde/centro)', fmt(uni, 2) + '×', '≤ ' + R.uniMax + '×', 'Tamaño de estrella en el borde frente al centro, con seeing ' + R.seeing + '″.');
+    if (R.planetary) add(strehl >= R.strehlMin ? 'ok' : strehl >= 0.5 ? 'warn' : 'fail', 'Strehl en el campo central (±' + R.strehlR + ' mm)', fmt(strehl, 3), '≥ ' + R.strehlMin, 'Con los segmentos tal como están en la tabla de segmentos (co-faseo perfecto si están a cero).');
+    add(fRange <= DOF ? 'ok' : fRange <= 2 * DOF ? 'warn' : 'fail', 'Curvatura de campo (rango de mejor foco)', fmt(fRange * 1000, 0) + ' µm', '≤ ' + fmt(DOF * 1000, 0) + ' µm (profundidad de foco)', isFinite(Rfield) ? 'Radio del campo ≈ ' + fmt(Rfield, 0) + ' mm.' : '');
+    add(axSpread <= DOF ? 'ok' : axSpread <= 2 * DOF ? 'warn' : 'fail', 'Color axial (foco por λ, eje)', fmt(axSpread * 1000, 1) + ' µm', '≤ ' + fmt(DOF * 1000, 0) + ' µm');
+    add(latSep / umA <= B / 2 ? 'ok' : latSep / umA <= B ? 'warn' : 'fail', 'Color lateral (borde, separación de centroides)', fmt(latSep, 2) + ' µm · ' + fmt(latSep / umA, 3) + '″', '≤ ' + fmt(B / 2, 2) + '″');
+    const dEdge = dist[dist.length - 1];
+    add(Math.abs(dEdge) <= R.distMax ? 'ok' : 'warn', 'Distorsión en el borde', fmt(dEdge, 3) + ' %', '≤ ' + R.distMax + ' %', 'Solo crítica para astrometría.');
+    add(vigEdge <= R.vigMax ? 'ok' : vigEdge <= 2 * R.vigMax ? 'warn' : 'fail', 'Viñeteo en el borde del campo', fmt(vigEdge, 1) + ' %', '≤ ' + R.vigMax + ' %');
+    add(fabSt, 'Fabricabilidad (espesores, materiales, radios)', fab.filter(x => x.st !== 'ok').length + ' incidencia(s)', 'sin incidencias');
+    if (ctx.nPert) add('warn', 'Descentrados activos', ctx.nPert + ' grupo(s)', 'diseño nominal = 0', 'La validación se está haciendo con elementos descentrados (pestaña Descentrados).');
+    if (sys.segments.some(e => e.p || e.tx || e.ty || e.dR)) add('info', 'Errores de segmento activos', 'sí', '—', 'Se incluyen en todos los resultados.');
+    const mc = ui.valMC && ui.valMC.hash === sysHash() ? ui.valMC : null;
+    if (mc) add(mc.pass >= 90 ? 'ok' : mc.pass >= 70 ? 'warn' : 'fail', 'Tolerancias (Monte Carlo)', fmt(mc.pass, 0) + ' % cumple', '≥ 90 % de unidades', mc.trials + ' pruebas');
+    else add('info', 'Tolerancias (Monte Carlo)', 'sin ejecutar', '≥ 90 % de unidades', 'Ejecuta el análisis al final de esta página.');
+
+    // ---- resumen ----
+    const nOk = checks.filter(c => c.st === 'ok').length, nW = checks.filter(c => c.st === 'warn').length, nF = checks.filter(c => c.st === 'fail').length;
+    P.append(h('div', { class: 'verdict ' + (nF ? 'fail' : nW ? 'warn' : 'ok') }, h('b', null, nF ? 'El diseño no cumple todos los requisitos' : nW ? 'El diseño cumple, con puntos a revisar' : 'El diseño cumple todos los requisitos evaluados'),
+      h('span', null, ` · ${nOk} cumplen · ${nW} a revisar · ${nF} no cumplen`)));
+    const tS = h('table', { class: 'tbl checks' }, h('tr', null, ['', 'Comprobación', 'Valor', 'Objetivo', 'Nota'].map(x => h('th', null, x))));
+    checks.forEach(c => tS.append(h('tr', null, h('td', null, pill(c.st)), h('td', null, c.name), h('td', null, c.val), h('td', null, c.tgt), h('td', { class: 'hint' }, c.note || ''))));
+    P.append(h('div', { class: 'wrapx' }, tS));
+
+    const W = Math.min(680, Math.max(300, P.clientWidth - 10));
+    // ---- calidad por campo ----
+    P.append(h('h3', null, 'Calidad de imagen por campo (plano imagen actual)'));
+    const tq = h('table', { class: 'tbl' }, h('tr', null, ['Campo [°]', 'Altura [mm]', 'Spot RMS [µm]', 'EE80 geom. Ø [µm]', 'EE80 geom. Ø [″]', 'Imagen entregada EE80 [″]', 'Viñeteo [%]'].map(x => h('th', null, x))));
+    q.forEach(x => tq.append(h('tr', null, h('td', null, fmt(x.y, 3)), h('td', null, fmt(x.h, 2)), h('td', null, fmt(x.sp && x.sp.rms, 2)), h('td', null, fmt(x.ee, 2)), h('td', { class: x.eeA <= B ? 'ok' : 'ko' }, fmt(x.eeA, 3)), h('td', null, fmt(x.del, 2)), h('td', null, fmt(x.vig * 100, 1)))));
+    P.append(h('div', { class: 'wrapx' }, tq));
+    const cq = h('canvas'); P.append(cq);
+    lineChart(cq, { w: W, h: 230, series: [{ x: frc.map((fr, k) => hImg[k]), y: spN.map(sp => eeG(sp) / umA) }, { x: frc.map((fr, k) => hImg[k]), y: spB.map(sp => eeG(sp) / umA), color: SER[1], dash: [5, 4] }], xlab: 'altura en la imagen [mm]', ylab: 'EE80 geom. Ø [″]', ymin: 0, hlines: [{ y: B, label: 'presupuesto', color: css('--good') }] });
+    P.append(legend([[SER[0], 'plano imagen actual'], [SER[1], 'reenfocando cada campo (límite si el campo fuese plano)']]));
+    P.append(h('p', { class: 'hint' }, `Criterio: EE80 geométrico (solo aberraciones del diseño) ≤ ${R.budget} × seeing ${R.seeing}″ = ${fmt(B, 2)}″ = ${fmt(Bum, 1)} µm. Imagen entregada ≈ √(seeing² + difracción² + diseño²) con EE80 de seeing gaussiano = 1,52 × FWHM = ${fmt(sEE, 2)}″ y difracción ${fmt(dA, 2)}″. 1″ = ${fmt(umA, 2)} µm.`));
+
+    // ---- curvatura ----
+    P.append(h('h3', null, 'Curvatura de campo'));
+    const cc = h('canvas'); P.append(cc);
+    const mid = (Math.max(...fz) + Math.min(...fz)) / 2;
+    lineChart(cc, { w: W, h: 230, series: [{ x: hImg, y: fz.map(v => v * 1000) }], xlab: 'altura en la imagen [mm]', ylab: 'mejor foco [µm]', hlines: [{ y: (mid + DOF / 2) * 1000, label: '+½ prof. de foco', color: css('--good') }, { y: (mid - DOF / 2) * 1000, label: '−½', color: css('--good') }] });
+    P.append(h('div', { class: 'stats' }, stat('Rango de mejor foco', fmt(fRange * 1000, 0) + ' <small>µm</small>', fRange <= DOF ? 'ok' : 'ko'), stat('Profundidad de foco (presupuesto)', fmt(DOF * 1000, 0) + ' <small>µm</small>'),
+      stat('Radio de curvatura del campo', isFinite(Rfield) ? fmt(Rfield, 0) + ' <small>mm</small>' : 'plano'),
+      stat('Spot borde: actual → reenfocado', fmt(spN[NF - 1] && spN[NF - 1].rms, 1) + ' → ' + fmt(spB[NF - 1] && spB[NF - 1].rms, 1) + ' <small>µm</small>')));
+    const gain = spN[NF - 1] && spB[NF - 1] ? spB[NF - 1].rms / spN[NF - 1].rms : 1;
+    P.append(h('div', { class: 'note ' + (fRange > DOF ? 'warn' : '') }, fRange > DOF
+      ? `La superficie de mejor foco se curva más que la profundidad de foco. Reenfocando el borde, su spot baja un ${fmt((1 - gain) * 100, 0)} %: ${gain < 0.7 ? 'la curvatura de campo domina en el borde → considerad un aplanador de campo o un sensor curvo/menor.' : 'la curvatura contribuye, pero el borde está dominado por otras aberraciones (coma/astigmatismo).'}`
+      : 'La curvatura de campo cabe dentro de la profundidad de foco del presupuesto.'));
+    P.append(h('div', { class: 'ctrl' }, h('span', null, `Mejor plano imagen común para todos los campos: Δ = ${fmt(dzAll, 4)} mm respecto al actual.`),
+      Math.abs(dzAll) > 1e-4 ? h('button', { class: 'small', onclick: () => { sys.surfaces[L - 1].t = +(sys.surfaces[L - 1].t + dzAll).toFixed(4); changed({ lde: true, now: true }); } }, 'Aplicar') : null));
+
+    // ---- color ----
+    P.append(h('h3', null, 'Color'));
+    const tc = h('table', { class: 'tbl' }, h('tr', null, ['λ [µm]', 'Mejor foco en eje [µm]', 'Centroide en el borde ΔY [µm]', 'ΔY [″]'].map(x => h('th', null, x))));
+    const cP = cen[sys.primary];
+    sys.wavelengths.forEach((w, wi) => tc.append(h('tr', null, h('td', null, w.wl + (wi === sys.primary ? ' *' : '')), h('td', null, fmt(fzW[wi] * 1000, 1)), h('td', null, cen[wi] && cP ? fmt(cen[wi].cy - cP.cy, 2) : '—'), h('td', null, cen[wi] && cP ? fmt((cen[wi].cy - cP.cy) / umA, 3) : '—'))));
+    P.append(h('div', { class: 'wrapx' }, tc));
+    P.append(h('p', { class: 'hint' }, 'Con solo espejos ambos son nulos; aparecen al añadir el corrector. Mejor foco relativo al plano imagen actual.'));
+
+    // ---- distorsión e iluminación ----
+    P.append(h('h3', null, 'Distorsión e iluminación relativa'));
+    const td = h('table', { class: 'tbl' }, h('tr', null, ['Campo [°]', 'Altura real [mm]', 'Altura paraxial [mm]', 'Distorsión [%]', 'Iluminación relativa [%]'].map(x => h('th', null, x))));
+    fc.forEach((y, k) => td.append(h('tr', null, h('td', null, fmt(y, 4)), h('td', null, fmt(hImg[k], 4)), h('td', null, fmt(k0 * Math.tan(y * Math.PI / 180), 4)), h('td', null, fmt(dist[k], 4)), h('td', null, fmt(RI[k] * 100, 1)))));
+    P.append(h('div', { class: 'wrapx' }, td));
+    P.append(h('p', { class: 'hint' }, 'Iluminación relativa geométrica (fracción de rayos que llegan, sin cos⁴, despreciable a estos ángulos).'));
+
+    // ---- Strehl ----
+    if (R.planetary) {
+      P.append(h('h3', null, 'Calidad difractiva en el campo central'));
+      const ts = h('table', { class: 'tbl' }, h('tr', null, ['Campo [°]', 'WFE RMS [λ]', 'WFE RMS [nm]', 'Strehl (Maréchal)'].map(x => h('th', null, x))));
+      wfeC.forEach(x => ts.append(h('tr', null, h('td', null, fmt(x.t, 4)), h('td', null, fmt(x.rms, 4)), h('td', null, fmt(x.nm, 1)), h('td', { class: x.S >= R.strehlMin ? 'ok' : 'ko' }, fmt(x.S, 3)))));
+      P.append(h('div', { class: 'wrapx' }, ts));
+    }
+
+    // ---- fabricabilidad ----
+    P.append(h('h3', null, 'Fabricabilidad'));
+    if (!fab.length) P.append(h('p', { class: 'hint' }, 'Sin elementos refractivos: solo espejos (comprueba semi-Ø frente a radio en la tabla).'));
+    else { const tf = h('table', { class: 'tbl' }, h('tr', null, ['', 'Comprobación', 'Valor', 'Mínimo'].map(x => h('th', null, x)))); fab.forEach(x => tf.append(h('tr', null, h('td', null, pill(x.st)), h('td', { style: 'text-align:left' }, x.what), h('td', null, x.val), h('td', null, x.tgt)))); P.append(h('div', { class: 'wrapx' }, tf)); }
+
+    // ---- referencias ----
+    P.append(h('h3', null, 'Comparación con referencias de dos espejos'));
+    const refBox = h('div'); P.append(refBox);
+    try {
+      const cg = O.cassegrain({ D: ui.cg.D, R1: ui.cg.R1, F: ui.cg.F, b: ui.cg.b, fieldDeg: ui.cg.field }), ap = sys.aperture;
+      const hole = ap.type === 'segmented' ? ap.ringR - ap.dseg / 2 : (ap.obsc / 2 || cg.D2 / 2);
+      const mk = (K1, K2) => { const s = nominalOf(sys); s.surfaces = O.cassegrainSurfaces(cg, ui.cg.D, hole, ui.cg.b, K1, K2); if (ap.type === 'segmented') s.surfaces[1].sd = O.epd(ap) / 2; const c = O.buildCtx(s), p = O.paraxial(c, s); if (p) s.surfaces[s.surfaces.length - 2].t = p.bfl; return s; };
+      const rows = [['Diseño actual', sys], ['Ritchey–Chrétien', mk(cg.K1rc, cg.K2rc)], ['Cassegrain clásico', mk(-1, cg.K2cc)], ['Todo esférico sin corrector', mk(0, 0)]];
+      const tr = h('table', { class: 'tbl' }, h('tr', null, ['Diseño', 'EFL [mm]'].concat(fieldsQ.map(y => 'EE80 geom. ' + fmt(y, 3) + '° [″]')).map(x => h('th', null, x))));
+      rows.forEach(([n, s]) => { const r = evalDesign(s, { N: 15, fields: fieldsQ }); if (!r.par) return; tr.append(h('tr', null, h('td', { style: 'text-align:left' }, n), h('td', null, fmt(r.par.efl, 1)), r.sp.map(sp => { const v = eeG(sp) * r.par.plate / 1000; return h('td', { class: v <= B ? 'ok' : 'ko' }, fmt(v, 3)); }))); });
+      refBox.append(h('div', { class: 'wrapx' }, tr), h('p', { class: 'hint' }, `Referencias calculadas con el solver de Herramientas (Ø${ui.cg.D}, R1 ${ui.cg.R1}, F ${ui.cg.F}, b ${ui.cg.b}) y vuestra apertura, en su foco paraxial. Si vuestro todo-esférico + corrector iguala o mejora al RC en todo el campo, el diseño es competitivo.`));
+    } catch (e) { refBox.append(h('p', { class: 'hint' }, 'No se pudieron calcular las referencias: ' + e.message)); }
+
+    // ---- tolerancias ----
+    P.append(h('h3', null, 'Tolerancias y robustez'));
+    tolSection(P, diff);
+  }
+
+  function tolSection(P, diff) {
+    const T = sys.tol, els = O.elements(sys).filter(e => e.kind !== 'seg'), segOn = sys.aperture.type === 'segmented' && sys.surfaces.some(s => s.seg);
+    P.append(h('p', { class: 'hint' }, 'Parte del diseño nominal (sin descentrados y con los segmentos a cero). Cada prueba aplica errores aleatorios uniformes dentro de ±tolerancia (descentrado e inclinación con dirección aleatoria), reenfoca (compensador = plano imagen) y mide el EE80 del peor campo, el WFE en eje y el desplazamiento de la imagen.'));
+    const tt = h('table', { class: 'tbl' }, h('tr', null, ['Elemento', 'Sup.', '± descentrado [mm]', '± inclinación [°]', '± Δz [mm]'].map(x => h('th', null, x))));
+    els.forEach(e => {
+      const k = e.from + '-' + e.to, cur = tolFor(e), set = (key) => v => { if (isFinite(v) && v >= 0) { T.els[k] = Object.assign({}, cur, T.els[k] || {}, { [key]: v }); save(); } };
+      tt.append(h('tr', null, h('td', { style: 'text-align:left' }, e.name), h('td', null, e.from + (e.to !== e.from ? '–' + e.to : '')), h('td', null, num(cur.dec, set('dec'), 0.01)), h('td', null, num(cur.tilt, set('tilt'), 0.005)), h('td', null, num(cur.dz, set('dz'), 0.01))));
+    });
+    P.append(h('div', { class: 'wrapx' }, tt));
+    if (segOn) P.append(h('div', { class: 'ctrl' }, h('b', null, 'Segmentos:'),
+      h('label', null, '± tip/tilt [µrad]', num(T.seg.t, v => { T.seg.t = Math.abs(v); save(); }, 0.1)),
+      h('label', null, '± ΔROC [mm]', num(T.seg.dR, v => { T.seg.dR = Math.abs(v); save(); }, 0.01)),
+      h('label', null, '± pistón [nm]', num(T.seg.p, v => { T.seg.p = Math.abs(v); save(); }, 5))));
+    const bS = h('button', null, 'Sensibilidad (uno a uno)'), bM = h('button', { class: 'primary' }, 'Monte Carlo'), bStop = h('button', { disabled: true }, 'Parar');
+    P.append(h('div', { class: 'ctrl' }, h('label', null, 'Pruebas', num(T.trials, v => { T.trials = Math.max(10, Math.min(2000, Math.round(v))); save(); }, 10)),
+      h('label', null, h('input', { type: 'checkbox', checked: T.refocus, onchange: e => { T.refocus = e.target.checked; save(); } }), 'Reenfocar (compensador)'), bS, bM, bStop));
+    const out = h('div'); P.append(out);
+    const B = budget();
+    const setup = () => {
+      const nom = nominalOf(sys), o = { N: 13, refocus: T.refocus, opd: true, opdN: 32 };
+      const r0 = evalDesign(nom, o); if (!r0.par) return null;
+      return { nom, o, r0, pl: r0.par.plate, ee0: worstEE(r0, diff, r0.par.plate) };
+    };
+    const metric = (s, base) => { const r = evalDesign(s, base.o); return { ee: worstEE(r, diff, base.pl), wfe: r.wfe, sh: chiefShift(r, base.r0) * base.pl / 1000, dz: r.dz }; };
+    let stop = false; bStop.onclick = () => { stop = true; };
+    bS.onclick = () => {
+      out.innerHTML = ''; const base = setup(); if (!base) return;
+      const cases = [];
+      els.forEach(e => { const t = tolFor(e); [['dy', t.dec, 'descentrado', 'mm'], ['tx', t.tilt, 'inclinación', '°'], ['dz', t.dz, 'Δz', 'mm']].forEach(([p, v, n, u]) => { if (v > 0) cases.push({ name: `${e.name}: ${n} +${v} ${u}`, f: s => s.perturb.push({ on: true, from: e.from, to: e.to, dx: 0, dy: 0, dz: 0, tx: 0, ty: 0, piv: 0, [p]: v }) }); }); });
+      if (segOn) {
+        if (T.seg.t > 0) cases.push({ name: `Segmento 1: tilt +${T.seg.t} µrad`, f: s => { s.segments[0].tx = T.seg.t; } });
+        if (T.seg.dR > 0) cases.push({ name: `Segmento 1: ΔROC +${T.seg.dR} mm`, f: s => { s.segments[0].dR = T.seg.dR; } });
+        if (T.seg.p > 0) cases.push({ name: `Segmento 1: pistón +${T.seg.p} nm`, f: s => { s.segments[0].p = T.seg.p; } });
+      }
+      const res = cases.map(c => { const s = cloneSys(base.nom); c.f(s); const m = metric(s, base); return Object.assign({ name: c.name }, m); });
+      res.sort((a, b) => (b.ee - base.ee0) - (a.ee - base.ee0) || (b.wfe - a.wfe));
+      const t = h('table', { class: 'tbl' }, h('tr', null, ['Perturbación', 'ΔEE80 geom. peor campo [″]', 'WFE eje [nm]', 'Imagen se desplaza [″]', 'Reenfoque [mm]'].map(x => h('th', null, x))));
+      res.forEach(r => t.append(h('tr', null, h('td', { style: 'text-align:left' }, r.name), h('td', { class: r.ee - base.ee0 > 0.25 * B ? 'ko' : '' }, fmt(r.ee - base.ee0, 3)), h('td', null, fmt(r.wfe, 1)), h('td', null, fmt(r.sh, 2)), h('td', null, fmt(r.dz, 3)))));
+      const rss = Math.sqrt(res.reduce((a, r) => a + Math.max(0, r.ee - base.ee0) ** 2, 0));
+      out.append(h('div', { class: 'stats' }, stat('EE80 nominal (peor campo)', fmt(base.ee0, 3) + ' <small>″</small>'), stat('WFE nominal eje', fmt(base.r0.wfe, 1) + ' <small>nm</small>'), stat('Suma RSS de ΔEE80', fmt(rss, 3) + ' <small>″</small>', base.ee0 + rss <= B ? 'ok' : 'ko')), h('div', { class: 'wrapx' }, t),
+        h('p', { class: 'hint' }, 'Ordenado de mayor a menor impacto en EE80: las primeras filas son las tolerancias que hay que apretar (o compensar con alineación).'));
+    };
+    bM.onclick = () => {
+      out.innerHTML = ''; const base = setup(); if (!base) return;
+      const N = T.trials, res = [], prog = h('div', { class: 'busy' }); out.append(prog);
+      stop = false; bM.disabled = bS.disabled = true; bStop.disabled = false;
+      const u = () => 2 * Math.random() - 1, rd = () => { const r = Math.sqrt(Math.random()), a = 2 * Math.PI * Math.random(); return [r * Math.cos(a), r * Math.sin(a)]; };
+      const step = () => {
+        const t0 = performance.now();
+        while (res.length < N && !stop && performance.now() - t0 < 60) {
+          const s = cloneSys(base.nom);
+          els.forEach(e => { const t = tolFor(e), d = rd(), a = rd(); s.perturb.push({ on: true, from: e.from, to: e.to, dx: d[0] * t.dec, dy: d[1] * t.dec, dz: u() * t.dz, tx: a[0] * t.tilt, ty: a[1] * t.tilt, piv: 0 }); });
+          if (segOn) s.segments = s.segments.map(() => ({ p: u() * T.seg.p, tx: u() * T.seg.t, ty: u() * T.seg.t, dR: u() * T.seg.dR }));
+          res.push(metric(s, base));
+        }
+        prog.textContent = `prueba ${res.length}/${N}`;
+        if (res.length < N && !stop) setTimeout(step, 0); else done();
+      };
+      const done = () => {
+        prog.remove(); bM.disabled = bS.disabled = false; bStop.disabled = true;
+        if (!res.length) return;
+        const q = (arr, p) => { const a = arr.filter(isFinite).sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))] : NaN; };
+        const ee = res.map(r => r.ee), wf = res.map(r => r.wfe), sh = res.map(r => r.sh), dz = res.map(r => r.dz);
+        const pass = res.filter(r => r.ee <= B).length / res.length * 100, rel = res.filter(r => r.ee <= Math.max(B, 1.1 * base.ee0)).length / res.length * 100, lam = sys.wavelengths[sys.primary].wl * 1000;
+        const Sm = w => Math.exp(-Math.pow(2 * Math.PI * w / lam, 2));
+        ui.valMC = { hash: sysHash(), pass, trials: res.length };
+        out.append(h('div', { class: 'stats' },
+          stat('Cumplen el presupuesto EE80', fmt(pass, 0) + ' <small>%</small>', pass >= 90 ? 'ok' : 'ko'),
+          stat('Degradación ≤ 10 % sobre el nominal', fmt(rel, 0) + ' <small>%</small>', rel >= 90 ? 'ok' : 'ko'),
+          stat('EE80 peor campo: mediana / p90', fmt(q(ee, 0.5), 3) + ' / ' + fmt(q(ee, 0.9), 3) + ' <small>″</small>'),
+          stat('WFE eje: mediana / p90', fmt(q(wf, 0.5), 0) + ' / ' + fmt(q(wf, 0.9), 0) + ' <small>nm</small>'),
+          stat('Strehl eje (p90, peor)', fmt(Sm(q(wf, 0.9)), 3), Sm(q(wf, 0.9)) >= sys.req.strehlMin ? 'ok' : 'ko'),
+          stat('Desplazamiento de imagen p90', fmt(q(sh, 0.9), 1) + ' <small>″</small>'),
+          stat('Recorrido de enfoque necesario', fmt(Math.min(...dz), 2) + ' … ' + fmt(Math.max(...dz), 2) + ' <small>mm</small>')));
+        // histograma EE80
+        const cv = h('canvas'); out.append(cv);
+        const Wc = Math.min(680, Math.max(300, P.clientWidth - 10)), Hc = 220, g = setupCanvas(cv, Wc, Hc);
+        const lo = Math.min(...ee.filter(isFinite), B * 0.5), hi = Math.max(...ee.filter(isFinite), B * 1.2), nb = 24, bins = new Array(nb).fill(0);
+        ee.forEach(v => { if (isFinite(v)) bins[Math.min(nb - 1, Math.floor((v - lo) / (hi - lo + 1e-12) * nb))]++; });
+        const mx = Math.max(...bins), bw = (Wc - 60) / nb, X = v => 40 + (v - lo) / (hi - lo) * (Wc - 60);
+        bins.forEach((b, i) => { const v = lo + (i + 0.5) / nb * (hi - lo); g.fillStyle = v <= B ? css('--good') : css('--bad'); g.globalAlpha = 0.8; g.fillRect(40 + i * bw, Hc - 30 - b / mx * (Hc - 50), bw - 2, b / mx * (Hc - 50)); });
+        g.globalAlpha = 1; g.strokeStyle = css('--ink2'); g.setLineDash([4, 3]); g.beginPath(); g.moveTo(X(B), 10); g.lineTo(X(B), Hc - 30); g.stroke(); g.setLineDash([]);
+        g.fillStyle = css('--ink3'); g.font = '11px IBM Plex Mono, monospace'; g.textAlign = 'left'; g.fillText(fmt(lo, 2) + '″', 40, Hc - 12); g.textAlign = 'right'; g.fillText(fmt(hi, 2) + '″', Wc - 20, Hc - 12); g.textAlign = 'center'; g.fillText('presupuesto ' + fmt(B, 2) + '″', X(B), Hc - 12);
+        out.append(h('p', { class: 'hint' }, 'Histograma del EE80 en el peor campo tras reenfocar. Verde = cumple el presupuesto. El resultado alimenta la fila «Tolerancias» del resumen (vuelve a abrir la pestaña para verlo).'));
+      };
+      setTimeout(step, 10);
+    };
   }
 
   // ---------------- acciones ----------------
