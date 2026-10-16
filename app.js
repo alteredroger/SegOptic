@@ -134,6 +134,7 @@
     s.perturb = Array.isArray(s.perturb) ? s.perturb : [];
     s.req = Object.assign({ efl: 0, eflTol: 1, fnoEq: 0, fnoTol: 5, bfMin: 200, seeing: 2, budget: 0.5, uniMax: 1.25, planetary: true, strehlMin: 0.8, strehlR: 2, vigMax: 20, distMax: 1, ctMin: 1, etMin: 1 }, s.req || {});
     s.tol = Object.assign({ els: {}, seg: { t: 1, dR: 0.2, p: 50 }, trials: 100, refocus: true }, s.tol || {});
+    s.surfaces.forEach(x => { x.a4 = +x.a4 || 0; x.a6 = +x.a6 || 0; x.a8 = +x.a8 || 0; });
     s.surfaces.forEach(x => { x.k = +x.k || 0; x.sd = +x.sd || 0; x.hole = +x.hole || 0; if (x.mat == null) x.mat = ''; if (x.cm == null) x.cm = ''; });
     return s;
   }
@@ -149,6 +150,7 @@
   // historial (deshacer/rehacer)
   const hist = { st: [], i: -1, t: null };
   function pushHist() {
+    normalize(sys); // estado canónico: evita entradas «distintas» solo por campos por defecto
     const s = jsonOut(sys);
     if (hist.st[hist.i] === s) return;
     hist.st = hist.st.slice(0, hist.i + 1); hist.st.push(s);
@@ -235,7 +237,9 @@
   function renderLDE() {
     const T = $('#lde'); T.innerHTML = '';
     const L = sys.surfaces.length - 1;
-    T.append(h('tr', null, ['#', 'Comentario', 'Radio', 'Espesor', 'Material', 'Semi-Ø', 'Agujero r', 'Cónica', 'Seg', ''].map(t => h('th', null, t))));
+    const showA = ui.showAsph || sys.surfaces.some(x => x.a4 || x.a6 || x.a8);
+    const cb = $('#chkAsph'); if (cb) cb.checked = showA;
+    T.append(h('tr', null, ['#', 'Comentario', 'Radio', 'Espesor', 'Material', 'Semi-Ø', 'Agujero r', 'Cónica'].concat(showA ? ['A4 [mm⁻³]', 'A6 [mm⁻⁵]', 'A8 [mm⁻⁷]'] : []).concat(['Seg', '']).map(t => h('th', null, t))));
     sys.surfaces.forEach((s, i) => {
       const isObj = i === 0, isImg = i === L;
       const inp = (key, allowInf, disabled, cls) => {
@@ -263,6 +267,9 @@
         h('td', null, inp('sd', false, isObj)),
         h('td', null, inp('hole', false, isObj)),
         cell(inp('k', false, isObj), isObj ? null : 'k'),
+        showA ? cell(inp('a4', false, isObj), isObj ? null : 'a4') : null,
+        showA ? cell(inp('a6', false, isObj), isObj ? null : 'a6') : null,
+        showA ? cell(inp('a8', false, isObj), isObj ? null : 'a8') : null,
         h('td', null, (!isObj && !isImg) ? h('input', { type: 'checkbox', checked: !!s.seg, title: 'Superficie segmentada', onchange: e => { sys.surfaces.forEach(x => delete x.seg); if (e.target.checked) s.seg = true; changed({ lde: true }); } }) : ''),
         h('td', null, isImg ? '' : h('button', { class: 'small', title: 'Insertar superficie después', onclick: () => { shiftVary(i + 1, 1); sys.surfaces.splice(i + 1, 0, { cm: '', r: Infinity, t: 10, mat: '', sd: 0, hole: 0, k: 0 }); changed({ lde: true }); } }, '+'),
           ' ', (!isObj && !isImg) ? h('button', { class: 'small', title: 'Eliminar', onclick: () => { shiftVary(i, -1); sys.surfaces.splice(i, 1); changed({ lde: true }); } }, '−') : '')
@@ -331,6 +338,11 @@
       t += '\nErrores de segmento (p nm, tx µrad, ty µrad, ΔR mm):\n';
       sys.segments.forEach((e, i) => { t += `  S${i + 1}: ${e.p}, ${e.tx}, ${e.ty}, ${e.dR}\n`; });
     }
+    const asp = sys.surfaces.map((x, i) => [i, x]).filter(([i, x]) => x.a4 || x.a6 || x.a8);
+    if (asp.length) {
+      t += '\nCoeficientes asféricos (sag += A4 r⁴ + A6 r⁶ + A8 r⁸):\n';
+      asp.forEach(([i, x]) => { t += `  Sup. ${i}: A4 = ${x.a4.toExponential(6)}  A6 = ${x.a6.toExponential(6)}  A8 = ${x.a8.toExponential(6)}\n`; });
+    }
     const pt = (sys.perturb || []).filter(g => g.on !== false && (g.dx || g.dy || g.dz || g.tx || g.ty));
     if (pt.length) {
       t += '\nDescentrados activos (Δx, Δy, Δz mm; tilt X, tilt Y °; pivote Δz mm):\n';
@@ -393,7 +405,7 @@
       const pts = [], segs = [];
       for (let k = 0; k <= 200; k++) {
         const y = -Hh + 2 * Hh * k / 200; if (s.hole > 0 && Math.abs(y) < s.hole) { pts.push(null); continue; }
-        const zz = ctx.z[i] + (O.sag(ctx.c[i], ctx.k[i], y * y) || 0);
+        const zz = ctx.z[i] + (O.sagS(ctx, i, y * y) || 0);
         pts.push([zz, y]);
         segs.push(i === ctx.segSurf && O.pupilMask(ctx.ap, ctx.centers, 0, y) >= 0);
       }
@@ -685,7 +697,7 @@
     return Object.keys(sys.vary).filter(k => sys.vary[k]).map(k => { const [i, p] = k.split(':'); return { i: +i, p }; })
       .filter(v => v.i > 0 && v.i < sys.surfaces.length && !(v.p === 't' && v.i === sys.surfaces.length - 1));
   }
-  function getV(s, v) { const x = s.surfaces[v.i][v.p]; return v.p === 'r' ? O.curv(x) : x; }
+  function getV(s, v) { const x = s.surfaces[v.i][v.p] || 0; return v.p === 'r' ? O.curv(s.surfaces[v.i].r) : x; }
   function setV(s, v, x) { if (v.p === 'r') s.surfaces[v.i].r = x === 0 ? Infinity : 1 / x; else s.surfaces[v.i][v.p] = x; }
   function meritOf(s) {
     let c; try { c = O.buildCtx(s); } catch (e) { return 1e9; }
@@ -708,7 +720,7 @@
       h('label', null, 'Peso EFL [µm²/mm²]', num(M.eflW, v => { M.eflW = v; save(); })),
       h('label', null, 'Rejilla de rayos', num(M.grid, v => { M.grid = Math.max(5, Math.round(v)); save(); }, 2))));
     const t = h('table', { class: 'tbl' }, h('tr', null, h('th', null, 'Sup.'), h('th', null, 'Parámetro'), h('th', null, 'Valor')));
-    vars.forEach(v => t.append(h('tr', null, h('td', null, v.i), h('td', null, ({ r: 'radio', t: 'espesor', k: 'cónica' })[v.p]), h('td', null, fmt(sys.surfaces[v.i][v.p], 6)))));
+    vars.forEach(v => t.append(h('tr', null, h('td', null, v.i), h('td', null, ({ r: 'radio', t: 'espesor', k: 'cónica', a4: 'A4', a6: 'A6', a8: 'A8' })[v.p]), h('td', null, fmt(sys.surfaces[v.i][v.p], 6)))));
     P.append(h('div', { class: 'wrapx' }, vars.length ? t : h('div', { class: 'note warn' }, 'No hay variables marcadas.')));
     const m0 = meritOf(sys);
     const info = h('div', { class: 'stats' }, stat('Mérito actual', fmt(m0, 4) + ' <small>µm</small>'));
@@ -721,7 +733,8 @@
     bRun.onclick = () => {
       const work = jsonIn(jsonOut(sys));
       const x0 = vars.map(v => getV(work, v));
-      const steps = vars.map((v, k) => v.p === 'r' ? (Math.abs(x0[k]) * 0.05 || 1e-4) : v.p === 't' ? Math.max(1, Math.abs(x0[k]) * 0.03) : 0.1);
+      const ASTEP = { a4: 1e-10, a6: 1e-15, a8: 1e-20 };
+      const steps = vars.map((v, k) => v.p === 'r' ? (Math.abs(x0[k]) * 0.05 || 1e-4) : v.p === 't' ? Math.max(1, Math.abs(x0[k]) * 0.03) : ASTEP[v.p] ? (Math.abs(x0[k]) * 0.2 || ASTEP[v.p]) : 0.1);
       const f = x => { vars.forEach((v, k) => setV(work, v, x[k])); return meritOf(work); };
       opt = { backup: jsonOut(sys), hist: [], stop: false };
       const nm = new O.NelderMead(f, x0, steps);
@@ -917,7 +930,7 @@
         for (let k = 0; k <= 160; k++) {
           const y = -Hh + 2 * Hh * k / 160;
           if (s.hole > 0 && Math.abs(y) < s.hole) { pts.push(null); segOn.push(false); continue; }
-          const sg = O.sag(ctx.c[i], ctx.k[i], y * y);
+          const sg = O.sagS(ctx, i, y * y);
           if (!isFinite(sg)) { pts.push(null); segOn.push(false); continue; }
           const w = O.xfPoint(ctx, i, [0, y, ctx.z[i] + sg]);
           pts.push([w[2], w[1]]);
@@ -929,7 +942,7 @@
     }
     function isAir(i) { const s = sys.surfaces[i]; return !s || O.isMirror(s.mat) ? true : Math.abs(O.glassIndex(s.mat, 0.55) - 1) < 1e-9; }
     function isGlass(i) { const s = sys.surfaces[i]; return s && !O.isMirror(s.mat) && O.glassIndex(s.mat, 0.55) > 1.0001; }
-    function sagW(i, y) { const v = O.sag(ctx.c[i], ctx.k[i], y * y); return isFinite(v) ? ctx.z[i] + v : NaN; }
+    function sagW(i, y) { const v = O.sagS(ctx, i, y * y); return isFinite(v) ? ctx.z[i] + v : NaN; }
     // punto del perfil (corte x = 0) en coordenadas mundo [z, y], con descentrados
     function zy(i, y) { const z = sagW(i, y); if (!isFinite(z)) return null; const w = O.xfPoint(ctx, i, [0, y, z]); return [w[2], w[1]]; }
     function P3(i, x, y) { const z = sagW(i, Math.hypot(x, y)); return isFinite(z) ? O.xfPoint(ctx, i, [x, y, z]) : null; }
@@ -1303,13 +1316,14 @@
       row('Semi-Ø', textIn('sd', false), null, 'mm');
       row('Agujero r', textIn('hole', false), null, 'mm');
       row('Cónica', textIn('k', false), slider(() => s.k, v => { s.k = +v.toFixed(5); }, 2), '');
+      if (!isImg) { row('A4', textIn('a4', false), null, 'mm⁻³'); row('A6', textIn('a6', false), null, 'mm⁻⁵'); row('A8', textIn('a8', false), null, 'mm⁻⁷'); }
       if (!document.getElementById('glassList')) document.body.append(h('datalist', { id: 'glassList' }, ['MIRROR', 'AIR'].concat(Object.keys(O.GLASS)).map(g => h('option', { value: g }))));
       if (sys.aperture.type === 'segmented' && !isImg) {
         insp.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!s.seg, onchange: e => { S.forEach(x => delete x.seg); if (e.target.checked) s.seg = true; changed({ lde: true }); } }), 'Superficie segmentada (aplica la pupila en anillo y los errores de segmento)'));
       }
       // información
       const fp = B.geo ? footprintAt(B.geo.rays, i) : NaN;
-      const hEdge = s.sd || fp, sagE = O.sag(ctx.c[i], ctx.k[i], hEdge * hEdge);
+      const hEdge = s.sd || fp, sagE = O.sagS(ctx, i, hEdge * hEdge);
       const info = h('div', { class: 'insinfo' });
       const zEl = h('b', null, fmt(ctx.z[i], 3) + ' mm'); insInputs._z = zEl;
       info.append(h('div', null, 'z del vértice ', zEl));
@@ -1557,7 +1571,7 @@
     // fabricabilidad
     const fab = [], S = sys.surfaces;
     const glass = i => !O.isMirror(S[i].mat) && O.glassIndex(S[i].mat, 0.55) > 1.0001;
-    const sg = (i, hh) => O.sag(ctx.c[i], ctx.k[i], hh * hh);
+    const sg = (i, hh) => O.sagS(ctx, i, hh * hh);
     for (let i = 1; i < L; i++) {
       const s = S[i], m = String(s.mat || '').trim();
       if (m && !O.isMirror(m) && !(O.glassIndex(m, wlp) > 0)) fab.push({ st: 'fail', what: `Sup. ${i}: material «${m}» desconocido`, val: '—', tgt: 'catálogo / nd/Vd' });
@@ -1580,9 +1594,11 @@
     add(eflDev <= R.eflTol ? 'ok' : 'fail', 'Focal efectiva', fmt(par.efl, 2) + ' mm', fmt(reqEfl, 1) + ' ± ' + R.eflTol + ' %');
     const fDev = Math.abs(par.fnoEq - reqF) / reqF * 100;
     add(fDev <= R.fnoTol ? 'ok' : 'warn', 'F/# equivalente', 'f/' + fmt(par.fnoEq, 3), 'f/' + fmt(reqF, 2) + ' ± ' + R.fnoTol + ' %');
-    add(bf >= R.bfMin ? 'ok' : 'fail', 'Foco tras el vértice del primario', fmt(bf, 1) + ' mm', '≥ ' + R.bfMin + ' mm');
+    const nMir = S.slice(1, L).filter(x => O.isMirror(x.mat)).length;
+    if (nMir >= 2 && bf > 0) add(bf >= R.bfMin ? 'ok' : 'fail', 'Foco tras el vértice del primario', fmt(bf, 1) + ' mm', '≥ ' + R.bfMin + ' mm');
+    else add('info', 'Distancia de la última superficie al foco', fmt(Math.abs(S[L - 1].t), 1) + ' mm', '—', nMir === 0 ? 'Refractor: es el foco trasero del objetivo.' : 'Comprueba que deja sitio para el enfocador y la cámara.');
     add(worst <= B ? 'ok' : worst <= 1.5 * B ? 'warn' : 'fail', 'EE80 geométrico (Ø) en el peor campo', fmt(worst, 2) + '″', '≤ ' + fmt(B, 2) + '″ (' + fmt(R.budget * 100, 0) + ' % del seeing)', 'Aberraciones del diseño. Imagen entregada estimada en el borde (seeing + difracción + diseño): ' + fmt(q[q.length - 1].del, 2) + '″.');
-    add('info', 'Límite de difracción de la pupila (EE80 Ø)', fmt(dA, 2) + '″', '—', 'Inherente a la apertura en anillo (lo fija sobre todo el Ø de cada segmento); no se optimiza con el diseño óptico.');
+    add('info', 'Límite de difracción de la pupila (EE80 Ø)', fmt(dA, 2) + '″', '—', (sys.aperture.type === 'segmented' ? 'Inherente a la apertura en anillo (lo fija sobre todo el Ø de cada segmento)' : 'Inherente a la apertura (λ/D y obstrucción)') + '; no se optimiza con el diseño óptico.');
     add(uni <= R.uniMax ? 'ok' : 'warn', 'Uniformidad de la imagen entregada (borde/centro)', fmt(uni, 2) + '×', '≤ ' + R.uniMax + '×', 'Tamaño de estrella en el borde frente al centro, con seeing ' + R.seeing + '″.');
     if (R.planetary) add(strehl >= R.strehlMin ? 'ok' : strehl >= 0.5 ? 'warn' : 'fail', 'Strehl en el campo central (±' + R.strehlR + ' mm)', fmt(strehl, 3), '≥ ' + R.strehlMin, 'Con los segmentos tal como están en la tabla de segmentos (co-faseo perfecto si están a cero).');
     add(fRange <= DOF ? 'ok' : fRange <= 2 * DOF ? 'warn' : 'fail', 'Curvatura de campo (rango de mejor foco)', fmt(fRange * 1000, 0) + ' µm', '≤ ' + fmt(DOF * 1000, 0) + ' µm (profundidad de foco)', isFinite(Rfield) ? 'Radio del campo ≈ ' + fmt(Rfield, 0) + ' mm.' : '');
@@ -1661,9 +1677,9 @@
     else { const tf = h('table', { class: 'tbl' }, h('tr', null, ['', 'Comprobación', 'Valor', 'Mínimo'].map(x => h('th', null, x)))); fab.forEach(x => tf.append(h('tr', null, h('td', null, pill(x.st)), h('td', { style: 'text-align:left' }, x.what), h('td', null, x.val), h('td', null, x.tgt)))); P.append(h('div', { class: 'wrapx' }, tf)); }
 
     // ---- referencias ----
-    P.append(h('h3', null, 'Comparación con referencias de dos espejos'));
-    const refBox = h('div'); P.append(refBox);
-    try {
+    const refBox = h('div');
+    if (nMir >= 2) { P.append(h('h3', null, 'Comparación con referencias de dos espejos')); P.append(refBox); }
+    if (nMir >= 2) try {
       const cg = O.cassegrain({ D: ui.cg.D, R1: ui.cg.R1, F: ui.cg.F, b: ui.cg.b, fieldDeg: ui.cg.field }), ap = sys.aperture;
       const hole = ap.type === 'segmented' ? ap.ringR - ap.dseg / 2 : (ap.obsc / 2 || cg.D2 / 2);
       const mk = (K1, K2) => { const s = nominalOf(sys); s.surfaces = O.cassegrainSurfaces(cg, ui.cg.D, hole, ui.cg.b, K1, K2); if (ap.type === 'segmented') s.surfaces[1].sd = O.epd(ap) / 2; const c = O.buildCtx(s), p = O.paraxial(c, s); if (p) s.surfaces[s.surfaces.length - 2].t = p.bfl; return s; };
@@ -1767,6 +1783,95 @@
     };
   }
 
+  // ---------------- asistente «Nuevo telescopio» ----------------
+  function toast(msg) {
+    const old = document.querySelector('.toast'); if (old) old.remove();
+    const t = h('div', { class: 'toast', role: 'status' }, h('span', null, msg), h('button', { class: 'small', 'aria-label': 'Cerrar', onclick: () => t.remove() }, '×'));
+    document.body.append(t); setTimeout(() => { if (t.isConnected) t.remove(); }, 15000);
+  }
+  function openWizard() {
+    const D = window.SegDesigns;
+    if (!D) { alert('Falta designs.js: sube también ese archivo.'); return; }
+    let cur = ui.wizType || 'newton', busy = false, cancel = false;
+    const vals = ui.wizVals = ui.wizVals || {};
+    const back = h('div', { class: 'modal-back' }), box = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Nuevo telescopio' });
+    back.append(box); document.body.append(back);
+    const close = () => { cancel = true; back.remove(); document.removeEventListener('keydown', esc); };
+    const esc = e => { if (e.key === 'Escape' && !busy) close(); };
+    document.addEventListener('keydown', esc);
+    back.addEventListener('mousedown', e => { if (e.target === back && !busy) close(); });
+
+    function render() {
+      box.innerHTML = '';
+      const T = D.TYPES.find(t => t.key === cur), v = vals[cur] = vals[cur] || D.defaults(T);
+      const nav = h('nav', { class: 'wiz-nav' });
+      let g = null;
+      D.TYPES.forEach(t => {
+        if (t.group !== g) { g = t.group; nav.append(h('div', { class: 'wiz-group' }, g)); }
+        nav.append(h('button', { class: t.key === cur ? 'on' : '', disabled: busy, onclick: () => { cur = ui.wizType = t.key; render(); } }, t.name));
+      });
+      const form = h('div', { class: 'wiz-form' });
+      const derived = h('div', { class: 'hint wiz-derived' });
+      const upd = () => {
+        const F = v.F || v.D * v.N, fno = F / v.D, th = Math.atan((v.h || 0) / F) * 180 / Math.PI;
+        derived.textContent = `Focal ${fmt(F, 1)} mm · f/${fmt(fno, 2)} · escala ${fmt(206264.8 / F, 2)}″/mm · campo ±${fmt(th, 3)}° (${fmt(2 * th * 60, 1)}′ de diagonal)`;
+      };
+      T.params.forEach(q => {
+        if (q.when === 'seg' && !v.seg) return;
+        if (q.when === 'manual' && v.auto !== 'manual') return;
+        let inp;
+        if (q.type === 'select') inp = h('select', { onchange: e => { v[q.k] = e.target.value; if (q.k === 'auto') render(); } }, q.options.map(([k, t]) => h('option', { value: k, selected: v[q.k] === k }, t)));
+        else if (q.type === 'check') inp = h('input', { type: 'checkbox', checked: !!v[q.k], onchange: e => { v[q.k] = e.target.checked; render(); } });
+        else inp = h('input', { type: 'number', value: v[q.k], step: q.step || 'any', min: q.min, oninput: e => { const x = parseFloat(e.target.value); if (isFinite(x)) { v[q.k] = x; upd(); } } });
+        form.append(h('label', null, q.label), h('div', { class: 'insrow' }, inp, q.unit ? h('span', { class: 'u' }, q.unit) : null));
+      });
+      upd();
+      const status = h('div', { class: 'wiz-status' });
+      const bCreate = h('button', { class: 'primary', disabled: busy }, T.tuned ? 'Crear y afinar' : 'Crear');
+      const bCancel = h('button', { onclick: () => { if (busy) cancel = true; else close(); } }, busy ? 'Detener' : 'Cancelar');
+      bCreate.onclick = () => create(T, v, status, bCreate, bCancel);
+      box.append(
+        h('div', { class: 'modal-h' }, h('h2', null, 'Nuevo telescopio'), h('button', { class: 'small', 'aria-label': 'Cerrar', disabled: busy, onclick: close }, '×')),
+        h('div', { class: 'wiz' }, nav, h('div', { class: 'wiz-main' },
+          h('h3', null, T.name), h('p', { class: 'wiz-desc' }, T.desc), form, derived,
+          T.tuned ? h('p', { class: 'hint' }, 'Este tipo se afina automáticamente tras crearlo (unos segundos). Puedes detenerlo en cualquier momento y quedarte con lo conseguido.') : null,
+          h('p', { class: 'hint' }, 'El diseño actual se sustituye (se puede recuperar con Deshacer).'),
+          status, h('div', { class: 'tools wiz-actions' }, bCancel, bCreate))));
+    }
+    function create(T, v, status, bCreate, bCancel) {
+      let r;
+      status.className = 'wiz-status busy'; status.textContent = 'Construyendo…';
+      setTimeout(() => {
+        try { r = D.build(T.key, v); }
+        catch (e) { status.className = 'wiz-status ko'; status.textContent = e.message; return; }
+        if (!r.tuner) return done();
+        busy = true; cancel = false; bCreate.disabled = true; bCancel.textContent = 'Detener';
+        box.querySelectorAll('.wiz-nav button, .modal-h button').forEach(b => b.disabled = true);
+        const loop = () => {
+          if (!back.isConnected) return;
+          const t0 = performance.now(); let st;
+          do { st = r.tuner.step(4); } while (!st.done && !cancel && performance.now() - t0 < 80);
+          status.textContent = `Afinando… iteración ${st.iter} de ${st.max} · mérito ${fmt(st.f, 3)} µm`;
+          if (st.done || cancel) done(); else setTimeout(loop, 0);
+        };
+        setTimeout(loop, 0);
+      }, 20);
+      function done() {
+        status.textContent = 'Terminando (enfoque y diámetros)…';
+        setTimeout(() => {
+          let s;
+          try { s = D.finalize(r); } catch (e) { busy = false; status.className = 'wiz-status ko'; status.textContent = 'Error: ' + e.message; return; }
+          busy = false;
+          sys = normalize(s); ui.refit = true; ui.sel = null; ui.tab = 'bench';
+          renderSys(); renderTabs(); changed({ lde: true, sys: true, now: true });
+          close();
+          if (r.note) toast(r.note);
+        }, 20);
+      }
+    }
+    render();
+  }
+
   // ---------------- acciones ----------------
   function download(name, text, type) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: type || 'text/plain' })); a.download = name; document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
@@ -1774,6 +1879,8 @@
   function slug() { return (sys.name || 'segoptic').toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'segoptic'; }
   function initActions() {
     const ps = $('#preset'); O.PRESETS.forEach(([k, t]) => ps.append(h('option', { value: k }, t)));
+    $('#btnNew').onclick = () => openWizard();
+    const ca = $('#chkAsph'); if (ca) ca.onchange = e => { ui.showAsph = e.target.checked; renderLDE(); };
     $('#btnPreset').onclick = () => { if (!confirm('¿Sustituir el sistema actual por el ejemplo?')) return; sys = normalize(O.makePreset(ps.value)); ui.refit = true; ui.sel = null; changed({ lde: true, sys: true, now: true }); };
     $('#btnSave').onclick = () => download(slug() + '.json', jsonOut(sys), 'application/json');
     $('#btnExport').onclick = () => download(slug() + '.txt', prescriptionText());

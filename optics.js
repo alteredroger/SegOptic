@@ -22,7 +22,11 @@
     'N-F2':     [1.39757037, 0.159201403, 1.2686543, 0.00995906143, 0.0546931752, 119.248346],
     'N-SF11':   [1.73759695, 0.313747346, 1.89878101, 0.013188707, 0.0623068142, 155.23629],
     'N-SK16':   [1.34317774, 0.241144399, 0.994317969, 0.00704687339, 0.0229005, 92.7508526],
-    'CAF2':     [0.5675888, 0.4710914, 3.8484723, 0.00252643, 0.01007833, 1200.556]
+    'CAF2':     [0.5675888, 0.4710914, 3.8484723, 0.00252643, 0.01007833, 1200.556],
+    'N-FK51A':  [0.971247817, 0.216901417, 0.904651666, 0.00472301995, 0.0153575612, 168.68133],
+    'N-BAK4':   [1.28834642, 0.132817724, 0.945395373, 0.00779980626, 0.0315631177, 105.965875],
+    'N-SF2':    [1.47343127, 0.163681849, 1.36920899, 0.0109019098, 0.0585683687, 127.404933],
+    'N-SF5':    [1.52481889, 0.187085527, 1.42729015, 0.011254756, 0.0588995392, 129.141675]
   };
 
   function isMirror(mat) { return String(mat || '').trim().toUpperCase() === 'MIRROR'; }
@@ -56,6 +60,37 @@
     const d = 1 - (1 + k) * c * c * r2;
     if (d < 0) return NaN;
     return c * r2 / (1 + Math.sqrt(d));
+  }
+  // Asfera par: sag = cónica + A4 r⁴ + A6 r⁶ + A8 r⁸   (A = [A4, A6, A8] o null)
+  function sagA(c, k, A, r2) {
+    let z = sag(c, k, r2);
+    if (A) z += r2 * r2 * (A[0] + r2 * (A[1] + r2 * A[2]));
+    return z;
+  }
+  function dsagdr2(c, k, A, r2) { // d sag / d(r²)
+    let d = 0;
+    if (c !== 0) { const q = 1 - (1 + k) * c * c * r2; if (q <= 0) return NaN; d = c / (2 * Math.sqrt(q)); }
+    if (A) d += r2 * (2 * A[0] + r2 * (3 * A[1] + 4 * A[2] * r2));
+    return d;
+  }
+  // refina por Newton la intersección con la asfera partiendo de la de la cónica
+  function intersectAsph(px, py, pz, dx, dy, dz, c, k, A, t0) {
+    let t = isFinite(t0) ? t0 : (Math.abs(dz) > 1e-15 ? -pz / dz : NaN);
+    if (!isFinite(t)) return NaN;
+    for (let it = 0; it < 30; it++) {
+      const x = px + t * dx, y = py + t * dy, z = pz + t * dz, r2 = x * x + y * y;
+      const g = sagA(c, k, A, r2) - z, d = dsagdr2(c, k, A, r2);
+      if (!isFinite(g) || !isFinite(d)) return NaN;
+      const gp = d * 2 * (x * dx + y * dy) - dz;
+      if (Math.abs(gp) < 1e-15) return NaN;
+      const dt = g / gp; t -= dt;
+      if (Math.abs(dt) < 1e-13) return t;
+    }
+    return t;
+  }
+  function normalAsph(x, y, c, k, A) {
+    const d = dsagdr2(c, k, A, x * x + y * y), nx = 2 * d * x, ny = 2 * d * y, n = Math.hypot(nx, ny, 1);
+    return [nx / n, ny / n, -1 / n];
   }
   // Intersección rayo (P local al vértice, D) con superficie cónica: rama cercana al vértice
   function intersectConic(px, py, pz, dx, dy, dz, c, k) {
@@ -165,6 +200,7 @@
     for (let i = 1; i < L; i++) z[i + 1] = z[i] + (+S[i].t || 0);
     const c = S.map(s => curv(s.r));
     const k = S.map(s => +s.k || 0);
+    const asp = S.map(s => { const a = [+s.a4 || 0, +s.a6 || 0, +s.a8 || 0]; return (a[0] || a[1] || a[2]) ? a : null; });
     const mirror = S.map(s => isMirror(s.mat));
     const ap = sys.aperture;
     const centers = segCenters(ap);
@@ -208,7 +244,7 @@
       for (let i = a; i <= b; i++) (xf[i] = xf[i] || []).push(T);
       nPert++;
     });
-    return { sys, S, L, z, c, k, mirror, ap, centers, segSurf, segData, xf, nPert, epd: epd(ap), nCache: new Map(), pupCache: new Map() };
+    return { sys, S, L, z, c, k, asp, mirror, ap, centers, segSurf, segData, xf, nPert, epd: epd(ap), nCache: new Map(), pupCache: new Map() };
   }
 
   function idxArr(ctx, wl) {
@@ -246,10 +282,12 @@
       }
       const cU = useSeg ? sd.cS : c, zU = useSeg ? sd.zS : zi;
       let Hx, Hy, Hz, Nx, Ny, Nz;
+      const A = useSeg ? null : ctx.asp[i];
       t = intersectConic(qx, qy, qz - zU, ex, ey, ez, cU, k);
+      if (A) t = intersectAsph(qx, qy, qz - zU, ex, ey, ez, cU, k, A, t);
       if (!isFinite(t)) return { ok: false, at: i, pts };
       Hx = qx + t * ex; Hy = qy + t * ey; Hz = qz + t * ez;
-      { const nn = normalLocal(Hx, Hy, Hz - zU, cU, k); Nx = nn[0]; Ny = nn[1]; Nz = nn[2]; }
+      { const nn = A ? normalAsph(Hx, Hy, cU, k, A) : normalLocal(Hx, Hy, Hz - zU, cU, k); Nx = nn[0]; Ny = nn[1]; Nz = nn[2]; }
       if (useSeg) {
         if (sd.Ta) {
           tmp = toWld(sd.Ta, Hx, Hy, Hz); Hx = tmp[0]; Hy = tmp[1]; Hz = tmp[2];
@@ -326,12 +364,12 @@
     if (!a.ok || !b.ok) return null;
     const sa = a.D[1] / Math.abs(a.D[2]), sb = b.D[1] / Math.abs(b.D[2]);
     if (Math.abs(sa - sb) < 1e-15) return null;
-    const efl = -2 * h / (sa - sb);
+    const eflSigned = -2 * h / (sa - sb), efl = Math.abs(eflSigned);
     const ma = a.D[1] / a.D[2], mb = b.D[1] / b.D[2];
     const zf = (b.P[1] - a.P[1] + a.P[2] * ma - b.P[2] * mb) / (ma - mb);
     const st = apertureStats(ctx.ap);
     return {
-      efl, fno: efl / ctx.epd, fnoEq: efl / st.deq, bfl: zf - ctx.z[L - 1], zImage: ctx.z[L], zFocus: zf,
+      efl, eflSigned, fno: efl / ctx.epd, fnoEq: efl / st.deq, bfl: zf - ctx.z[L - 1], zImage: ctx.z[L], zFocus: zf,
       plate: 206264.806 / efl, epd: ctx.epd, area: st.area, deq: st.deq, gap: st.gap
     };
   }
@@ -576,7 +614,7 @@
     return [Q[0] + t * E[0], Q[1] + t * E[1]];
   }
   // spot en el plano imagen desplazado dz [mm]; resultados en µm
-  function spotAt(fr, ctx, dz, wi) {
+  function spotAt(fr, ctx, dz, wi, fast) {
     let sx = 0, sy = 0, sw = 0; const pts = [];
     for (const r of fr.rays) {
       if (wi != null && r.wi !== wi) continue;
@@ -586,6 +624,7 @@
     if (!sw) return null;
     const cx = sx / sw, cy = sy / sw, rr = [];
     let s2 = 0;
+    if (fast) { for (let i = 0; i < pts.length; i += 3) s2 += pts[i + 2] * ((pts[i] - cx) ** 2 + (pts[i + 1] - cy) ** 2); return { rms: Math.sqrt(s2 / sw) * 1000 }; }
     for (let i = 0; i < pts.length; i += 3) { const d2 = (pts[i] - cx) ** 2 + (pts[i + 1] - cy) ** 2; s2 += pts[i + 2] * d2; rr.push([Math.sqrt(d2), pts[i + 2]]); }
     rr.sort((a, b) => a[0] - b[0]);
     let acc = 0, r80 = rr[rr.length - 1][0];
@@ -595,11 +634,11 @@
   }
   // desplazamiento del plano imagen [mm] que minimiza Σ RMS² sobre los campos dados
   function bestFocus(frs, ctx, wi, R0) {
-    const f = dz => { let s = 0; for (const fr of frs) { const sp = spotAt(fr, ctx, dz, wi); if (!sp) return 1e18; s += sp.rms * sp.rms; } return s; };
+    const f = dz => { let s = 0; for (const fr of frs) { const sp = spotAt(fr, ctx, dz, wi, true); if (!sp) return 1e18; s += sp.rms * sp.rms; } return s; };
     let R = R0 || 5, best = 0;
     for (let pass = 0; pass < 5; pass++) {
       const g = (Math.sqrt(5) - 1) / 2; let a = best - R, b = best + R, c = b - g * (b - a), d = a + g * (b - a), fc = f(c), fd = f(d);
-      for (let it = 0; it < 70; it++) { if (fc < fd) { b = d; d = c; fd = fc; c = b - g * (b - a); fc = f(c); } else { a = c; c = d; fc = fd; d = a + g * (b - a); fd = f(d); } }
+      for (let it = 0; it < 48; it++) { if (fc < fd) { b = d; d = c; fd = fc; c = b - g * (b - a); fc = f(c); } else { a = c; c = d; fc = fd; d = a + g * (b - a); fd = f(d); } }
       const x = (a + b) / 2;
       if (Math.abs(x - best) < 0.9 * R) { best = x; break; }
       best = x; R *= 4;
@@ -916,6 +955,7 @@
 
   const API = {
     GLASS, glassIndex, isMirror, curv, sag, epd, segCenters, segAngles, segmentGap, pupilMask, apertureStats,
+    sagA, sagS: (ctx, i, r2) => sagA(ctx.c[i], ctx.k[i], ctx.asp[i], r2),
     buildCtx, traceRay, rotXY, xfPoint, fieldRays, spotAt, bestFocus, imgHit, elements, fieldDir, startPt, pupilSamples, chief, paraxial, spot, opdMap, psf, fft1, fft2,
     cassegrain, cassegrainSurfaces, makePreset, PRESETS, zeroSegments,
     phasingModel, wfeEvaluator, closedLoop, symEig, gauss, NelderMead

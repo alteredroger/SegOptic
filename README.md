@@ -6,13 +6,29 @@ Funciona entera en el navegador: abre `index.html` o publícala con GitHub Pages
 
 ## Publicar en GitHub Pages
 
-1. Crea un repositorio (p. ej. `segoptic`) y sube **todos** los archivos de esta carpeta a la raíz: `index.html`, `style.css`, `optics.js`, `app.js`, `.nojekyll`, `README.md`.
+1. Crea un repositorio (p. ej. `segoptic`) y sube **todos** los archivos de esta carpeta a la raíz: `index.html`, `style.css`, `optics.js`, `designs.js`, `app.js`, `.nojekyll`, `README.md`.
 2. En el repo: **Settings → Pages → Build and deployment → Source: Deploy from a branch**, rama `main`, carpeta `/ (root)` → Save.
 3. Al cabo de un minuto estará en `https://<usuario>.github.io/segoptic/`.
 
 Para usarla en local basta con abrir `index.html` (no necesita servidor).
 
 ## Qué hace
+
+## Nuevo telescopio (asistente)
+
+El botón **Nuevo telescopio…** de la cabecera genera un sistema completo a partir de unos pocos datos (apertura, focal o F/#, tamaño del sensor, banda…):
+
+| Grupo | Tipos |
+|---|---|
+| Reflectores | Foco primario · Newtoniano (diagonal dimensionada para el sensor) · Cassegrain clásico · Ritchey–Chrétien · Dall–Kirkham · Pressmann–Camichel · Cassegrain todo esférico · Gregoriano. Opción de primario segmentado en anillo |
+| Catadióptricos | Cámara Schmidt (superficie focal curva) · Schmidt–Cassegrain · Maksutov–Cassegrain (secundario aluminizado en el menisco) |
+| Refractores | Lente simple · Acromático (doblete cementado) · Apocromático (triplete, elección automática de vidrios) · Astrógrafo Petzval |
+
+Los tipos que lo necesitan (catadióptricos y refractores) se afinan automáticamente al crearlos (Nelder–Mead sobre curvaturas, asferas y separaciones, con la focal y el foco trasero como restricciones). Las cónicas de Dall–Kirkham, Pressmann–Camichel y Gregoriano se resuelven para anular la esférica en eje. El resultado queda en el editor con sus variables marcadas, listo para seguir optimizando.
+
+## Superficies asféricas
+
+Además de la cónica, cada superficie admite coeficientes asféricos pares: sag = cónica + A4·r⁴ + A6·r⁶ + A8·r⁸ (como «Even Asphere» en Zemax). Se muestran con la casilla **Asféricos** del editor, se editan también en el inspector y pueden marcarse como variables de optimización.
 
 | Pestaña | Contenido |
 |---|---|
@@ -79,13 +95,15 @@ Comprobado contra casos con solución conocida:
 ## Limitaciones conocidas
 
 - Trazado secuencial: el paso de la luz por el agujero central se modela con una superficie ficticia («Plano del primario») y el bloqueo del secundario con la «Obstrucción Ø» de la pupila.
-- Sólo superficies cónicas (sin asferas pares).
+- Superficies cónicas con términos asféricos pares hasta r⁸; sin superficies libres ni descentradas fuera de eje (off-axis).
+- La diagonal de un newtoniano se modela desplegada sobre el eje (un espejo plano no añade aberraciones); su sombra está en la obstrucción.
 - PSF/MTF monocromáticas y fiables cuando el RMS de frente de onda ≲ 1 λ; para diseños lejos de difracción usar Spot.
 - El modelo de sensores de borde es lineal (Δz en la posición del sensor); no modela deriva térmica del propio sensor ni acoplamiento con el hueco.
 - El optimizador es Nelder–Mead (robusto pero lento con muchas variables); para el corrector final conviene validar en `rayoptics`/Zemax.
 
 ## Estructura
 
+- `designs.js` — generadores de telescopios del asistente.
 - `optics.js` — motor (sin dependencias, también se puede usar desde Node: `require('./optics.js')`).
 - `app.js` — interfaz.
 - `style.css`, `index.html`.

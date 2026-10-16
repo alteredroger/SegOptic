@@ -7,7 +7,7 @@
 <meta name="description" content="Trazado de rayos, OPD, PSF/MTF, optimización y simulación de co-faseo para telescopios segmentados en anillo.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2026.10.16b">
 </head>
 <body>
 <header class="top">
@@ -24,6 +24,7 @@
     </div>
   </div>
   <div class="actions">
+    <button id="btnNew" class="primary">Nuevo telescopio…</button>
     <select id="preset" aria-label="Ejemplos"></select>
     <button id="btnPreset">Cargar</button>
     <button id="btnOpen">Abrir…</button>
@@ -43,6 +44,7 @@
     <div class="card-h">
       <h2>Editor de superficies</h2>
       <div class="tools">
+        <label class="lbl" title="Muestra las columnas de coeficientes asféricos"><input type="checkbox" id="chkAsph"> Asféricos</label>
         <button id="btnUndo" title="Deshacer (Ctrl+Z)" disabled>↶ Deshacer</button>
         <button id="btnRedo" title="Rehacer (Ctrl+Y)" disabled>↷ Rehacer</button>
         <button id="btnParax" title="Ajusta el último espesor al foco paraxial">Foco paraxial</button>
@@ -60,10 +62,11 @@
 </main>
 
 <footer class="foot">
-  SegOptic · trazado real 3D secuencial · convenciones tipo Zemax (radio con signo, espesor negativo tras espejo)
+  SegOptic v2026.10.16b · trazado real 3D secuencial · convenciones tipo Zemax (radio con signo, espesor negativo tras espejo)
 </footer>
 
-<script src="optics.js"></script>
-<script src="app.js"></script>
+<script src="optics.js?v=2026.10.16b"></script>
+<script src="designs.js?v=2026.10.16b"></script>
+<script src="app.js?v=2026.10.16b"></script>
 </body>
 </html>
