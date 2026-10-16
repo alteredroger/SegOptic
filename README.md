@@ -16,6 +16,8 @@ Para usarla en local basta con abrir `index.html` (no necesita servidor).
 
 | Pestaña | Contenido |
 |---|---|
+| Validación | Semáforo de cumple/no cumple frente a requisitos editables: EFL, F/#, foco tras el primario, EE80 geométrico vs presupuesto de seeing, uniformidad, Strehl central, curvatura de campo, color axial y lateral, distorsión, viñeteo, fabricabilidad (espesores centro/borde, materiales, radios), comparación con RC/clásico, y tolerancias (sensibilidad uno a uno + Monte Carlo con reenfoque) |
+| Descentrados | Descentrado Δx/Δy, desplazamiento Δz e inclinaciones de cualquier elemento o grupo como sólido rígido, con pivote configurable (vértice, centro de curvatura…); efecto frente al nominal y barrido de sensibilidad con tolerancia para el presupuesto |
 | Banco óptico | Editor visual 2D/3D: seleccionar, mover (con compensación de espesores), cambiar semi-Ø, curvar perfiles, insertar elementos con un clic sobre el haz, inspector con deslizadores y métricas en vivo |
 | Resumen | EFL, F/#, Ø equivalente, área, escala de placa, hueco entre segmentos, avisos, spot RMS por campo, prescripción |
 | Layout 2D | Corte YZ con rayos por campo, segmentos resaltados, zoom al foco |
@@ -39,6 +41,22 @@ Los diseños se guardan automáticamente en el navegador y se pueden exportar/im
 - **3D:** arrastra para orbitar, rueda para zoom. Muestra cada segmento del anillo.
 - **Deshacer / rehacer:** Ctrl+Z / Ctrl+Y (o Ctrl+Mayús+Z), también con los botones del editor. **Supr** elimina la superficie seleccionada.
 
+## Validación: criterios
+
+- **EE80 geométrico** (diámetro que encierra el 80 % de la energía, solo aberraciones del diseño) ≤ *fracción × seeing* (por defecto 0,5 × 2″ = 1″). La difracción de la pupila en anillo (≈1,5″ EE80 para segmentos Ø150, la fija λ/d del segmento) se muestra aparte porque no depende del diseño óptico.
+- **Imagen entregada** ≈ √(seeing² + difracción² + diseño²), con EE80 de seeing gaussiano = 1,52 × FWHM; la uniformidad borde/centro se evalúa sobre ella.
+- **Profundidad de foco** del presupuesto = F/# × presupuesto (µm); curvatura de campo y color axial deben caber dentro.
+- **Strehl central** (opcional, planetaria) por Maréchal en eje y a ±R mm, con los segmentos como estén en su tabla.
+- **Tolerancias:** parten del diseño nominal (sin descentrados, segmentos a cero); errores uniformes en ±tolerancia (descentrado/inclinación con dirección aleatoria); compensador = plano imagen. El WFE en eje se mide enfocando en el eje.
+
+## Descentrados: convenciones
+
+- Cada grupo (superficies *de*–*a*) se mueve como un sólido: mundo = P + R·(q − P) + d, con P = vértice de la primera superficie + pivote Δz, R = Ry(tilt Y)·Rx(tilt X) en grados y d = (Δx, Δy, Δz).
+- Δz desplaza el elemento sin mover el resto (equivale a cambiar el espesor anterior y el siguiente a la vez).
+- Las aperturas (semi-Ø, agujero) se mueven con el elemento.
+- Botón **CC**: pivote en el centro de curvatura. Para una esfera, girar alrededor de su centro no cambia nada; para un secundario asférico deja solo la coma, sin desapuntar.
+- ΔROC de segmento: cónica madre con |R| + ΔR (misma constante cónica) que pasa por el centro del segmento y realineada en tip/tilt.
+
 ## Convenciones (tipo Zemax)
 
 - Unidades mm; λ en µm; ángulos de campo en grados (eje Y).
@@ -61,7 +79,7 @@ Comprobado contra casos con solución conocida:
 ## Limitaciones conocidas
 
 - Trazado secuencial: el paso de la luz por el agujero central se modela con una superficie ficticia («Plano del primario») y el bloqueo del secundario con la «Obstrucción Ø» de la pupila.
-- Sólo superficies cónicas (sin asferas pares, sin descentrados/inclinaciones de elementos completos todavía).
+- Sólo superficies cónicas (sin asferas pares).
 - PSF/MTF monocromáticas y fiables cuando el RMS de frente de onda ≲ 1 λ; para diseños lejos de difracción usar Spot.
 - El modelo de sensores de borde es lineal (Δz en la posición del sensor); no modela deriva térmica del propio sensor ni acoplamiento con el hueco.
 - El optimizador es Nelder–Mead (robusto pero lento con muchas variables); para el corrector final conviene validar en `rayoptics`/Zemax.
